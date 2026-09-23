@@ -1,4 +1,0 @@
-{
-  "$schema": "https://nubjs.com/schema/v0.7.json",
-  "install": { "linker": "hoisted" }
-}

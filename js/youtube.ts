@@ -1,4 +1,4 @@
-import {Innertube, Platform, Player, YTNodes, Log, Constants} from 'youtubei.js/web.bundle';
+import {Innertube, Platform, Player, YTNodes, Log, Constants} from 'youtubei.js';
 
 declare function hostFetch(request: string): Promise<string>;
 declare function hostCookie(): string;
@@ -13,7 +13,7 @@ async function fetchThroughRust(input: RequestInfo | URL, init?: RequestInit) {
 }
 
 Platform.load({
-  runtime: 'react-native', server: true,
+  runtime: 'unknown', server: true,
   fetch: fetchThroughRust, Request, Response, Headers, FormData, File,
   ReadableStream, CustomEvent,
   uuidv4: () => crypto.randomUUID(),

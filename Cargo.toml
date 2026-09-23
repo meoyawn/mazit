@@ -7,10 +7,6 @@ description = "A desktop app for listening to YouTube as a podcast"
 license = "MIT"
 repository = "https://github.com/meoyawn/mazit"
 
-[workspace]
-members = ["xtask"]
-resolver = "3"
-
 [features]
 default = ["desktop"]
 desktop = ["dep:gpui", "dep:gpui-component", "dep:tray-icon", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]

@@ -8,7 +8,7 @@ Mazit downloads audio, prepares fast-start M4A files, and refreshes feeds in the
 
 ## Build and run
 
-The current build targets Apple Silicon Macs running macOS 14 or later. Development requires CMake, rustup with stable Rust, go-task (`task`), Xcode, and Nub 0.9.2.
+The current build targets Apple Silicon Macs running macOS 14 or later. Development requires CMake, rustup with stable Rust, go-task (`task`), Xcode, and Bun 1.4.2.
 
 ```sh
 git clone https://github.com/meoyawn/mazit.git
@@ -20,10 +20,13 @@ task build
 The build prepares FFmpeg and the embedded YouTube.js bridge automatically.
 
 - `task dev` — watch sources, rebuild, and restart the GPUI app. Installs Watchexec if needed.
+- `task run` — prepare dependencies, build debug Rust, and run `target/debug/mazit`. Watchexec calls this task on each restart.
+- `task build:debug` — build the debug binary without starting it.
 - `task build` — build the macOS Apple Silicon release binary at `target/aarch64-apple-darwin/release/mazit`.
+- `task bundle` — build the macOS app at `dist/Mazit.app`.
 - `task lint` — format the Rust workspace, then run Clippy.
 
-Run `task build` or `task dev` once before linting to prepare the native libraries and JavaScript bundle. Use `mazit --help` for the command-line options, including one-shot synchronization and a custom library directory.
+The dependency graph is `run → build:debug → prepare` and `build → prepare`. Preparation bundles the YouTube bridge with Bun and runs the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build checksum-verified FFmpeg libraries when missing. JavaScript installation runs before bundling; Rust compilation waits for both the bridge and FFmpeg. Use `task run -- --help` for the command-line options, including one-shot synchronization and a custom library directory.
 
 ## Privacy
 

@@ -12,32 +12,69 @@ tasks:
     # Rust UI changes restart the process; in-memory UI state is reset.
     cmd: >-
       watchexec --restart --debounce 300ms --stop-timeout 5s
-      --watch src --watch js --watch xtask --watch assets
-      --watch Cargo.toml --watch Cargo.lock
-      --watch package.json --watch nub.lock --watch nub.jsonc
-      --shell none -- sh -c
-      'cargo run --package xtask -- prepare &&
-      cargo run --package mazit --bin mazit -- "$@"'
-      mazit-dev {{.CLI_ARGS}}
+      --watch src --watch js --watch scripts --watch assets
+      --watch Cargo.toml --watch Cargo.lock --watch Taskfile.yaml
+      --watch package.json --watch bun.lock
+      --shell none -- task run -- {{.CLI_ARGS}}
+
+  run:
+    desc: Build and run the GPUI app once
+    deps: [build:debug]
+    cmd: ./target/debug/mazit {{.CLI_ARGS}}
+
+  build:debug:
+    desc: Build the debug binary
+    run: once
+    deps: [prepare]
+    cmd: cargo build --package mazit --bin mazit
 
   build:
     desc: Build the macOS Apple Silicon release binary
+    run: once
     deps: [prepare]
     preconditions:
       - sh: test '{{OS}}/{{ARCH}}' = darwin/arm64
         msg: Build on an Apple Silicon Mac so bundled FFmpeg matches the release target.
     cmd: cargo build --release --target aarch64-apple-darwin --package mazit --bin mazit
 
+  bundle:
+    desc: Build dist/Mazit.app for macOS Apple Silicon
+    deps: [build]
+    cmds:
+      - mkdir -p dist/Mazit.app/Contents/MacOS dist/Mazit.app/Contents/Resources
+      - cp target/aarch64-apple-darwin/release/mazit dist/Mazit.app/Contents/MacOS/Mazit
+      - cp assets/Info.plist dist/Mazit.app/Contents/Info.plist
+      - cp "$FFMPEG_DIR/COPYING.LGPLv2.1" dist/Mazit.app/Contents/Resources/FFmpeg-LICENSE.txt
+
   lint:
     desc: Format the Rust workspace, then lint it with Clippy
+    deps: [prepare]
     cmds:
       - cargo fmt --all
       - cargo clippy --workspace -- -D warnings
 
   prepare:
+    desc: Prepare the JavaScript bridge and native libraries
+    run: once
+    deps: [js:bundle, ffmpeg:build]
+
+  js:bundle:
     internal: true
     run: once
-    cmd: cargo run --package xtask -- prepare
+    deps: [js:install]
+    cmd: >-
+      bun build js/youtube.ts --keep-names --target browser
+      --format esm --outfile generated/youtube.js
+
+  js:install:
+    internal: true
+    run: once
+    cmd: bun install --frozen-lockfile
+
+  ffmpeg:build:
+    internal: true
+    run: once
+    cmd: bun scripts/prepare-ffmpeg.ts
 
   dev:tools:
     internal: true

@@ -3,7 +3,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use llrt_modules::module_builder::ModuleBuilder;
 use reqwest::Client;
 use rquickjs::{
-    AsyncContext, AsyncRuntime, Function, Promise, async_with,
+    AsyncContext, AsyncRuntime, Function, Module, Promise, async_with,
     function::{Async, Func},
 };
 use serde::{Deserialize, Serialize};
@@ -76,7 +76,7 @@ impl YouTube {
                             async move { match fetch_metadata(client, request).await { Ok(value) => value.to_string(), Err(error) => json!({"error": crate::redact(&error.to_string())}).to_string() } }
                         })))?;
                         ctx.eval::<(), _>("var console = {log(){},info(){},warn(){},error(){},debug(){}};")?;
-                        ctx.eval::<(), _>(include_str!("../generated/youtube.js"))
+                        load_bridge(&ctx)
                             .inspect_err(|_| { eprintln!("QuickJS initialization: {:?}", ctx.catch()); })
                     }).await.context("Load embedded YouTube.js")?;
                     Ok::<_, anyhow::Error>((runtime, context))
@@ -235,6 +235,17 @@ impl YouTube {
         )?)
     }
 }
+
+fn load_bridge<'js>(ctx: &rquickjs::Ctx<'js>) -> rquickjs::Result<()> {
+    let module = Module::declare(
+        ctx.clone(),
+        "youtube",
+        include_str!("../generated/youtube.js"),
+    )?;
+    let (module, evaluated) = module.eval()?;
+    evaluated.finish::<()>()?;
+    ctx.globals().set("YouTubeBridge", module.namespace()?)
+}
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -304,4 +315,30 @@ async fn fetch_metadata(client: Client, json: String) -> Result<Value> {
         }
     }
     Ok(json!({"status": status, "headers": headers, "body": BASE64_STANDARD.encode(body)}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bun_bundle_initializes_in_quickjs() {
+        let runtime = AsyncRuntime::new().unwrap();
+        runtime.set_max_stack_size(4 * 1024 * 1024).await;
+        let (resolver, loader, globals) = ModuleBuilder::default().build();
+        runtime.set_loader(resolver, loader).await;
+        let context = AsyncContext::full(&runtime).await.unwrap();
+        context
+            .with(|ctx| {
+                use llrt_utils::primordials::Primordial;
+                llrt_utils::primordials::BasePrimordials::init(&ctx)?;
+                globals.attach(&ctx)?;
+                load_bridge(&ctx)?;
+                let bridge: rquickjs::Object = ctx.globals().get("YouTubeBridge")?;
+                let _: Function = bridge.get("call")?;
+                Ok::<_, rquickjs::Error>(())
+            })
+            .await
+            .unwrap();
+    }
 }
