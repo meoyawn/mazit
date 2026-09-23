@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { YTNodes } from "youtubei.js";
-import { playlistEntry } from "../js/youtube-listing.ts";
+import { Innertube, YT, YTNodes } from "youtubei.js";
+import {
+  fetchPlaylist,
+  playlistEntry,
+  playlistPage,
+} from "../js/youtube-listing.ts";
 
 describe("flat playlist metadata", () => {
   test("reads age from the classic renderer's videoInfo", () => {
@@ -56,4 +60,191 @@ describe("flat playlist metadata", () => {
     });
     expect(playlistEntry(item).published_text).toEqual(null);
   });
+
+  test("includes unavailable entries across flat podcast pages without rejecting the description", async () => {
+    const first = {
+      metadata: {
+        playlistMetadataRenderer: {
+          title: "Interviews",
+          description: "Expert interviews",
+        },
+      },
+      sidebar: {
+        playlistSidebarRenderer: {
+          items: [
+            {
+              playlistSidebarPrimaryInfoRenderer: {
+                stats: [{ simpleText: "3 episodes" }],
+              },
+            },
+          ],
+        },
+      },
+      alerts: [
+        {
+          alertWithButtonRenderer: {
+            type: "INFO",
+            text: {
+              simpleText: "Unavailable videos will be hidden during playback",
+            },
+          },
+        },
+      ],
+      contents: {
+        itemSectionRenderer: {
+          contents: [
+            { messageRenderer: { text: { simpleText: "Expert interviews" } } },
+            {
+              playlistVideoListRenderer: {
+                contents: [
+                  {
+                    lockupViewModel: {
+                      contentId: "abcdefghijk",
+                      contentType: "LOCKUP_CONTENT_TYPE_VIDEO",
+                      metadata: {
+                        lockupMetadataViewModel: {
+                          title: { content: "First interview" },
+                        },
+                      },
+                    },
+                  },
+                  {
+                    continuationItemRenderer: {
+                      continuationEndpoint: {
+                        commandMetadata: {
+                          webCommandMetadata: {
+                            apiUrl: "/youtubei/v1/browse",
+                            sendPost: true,
+                          },
+                        },
+                        continuationCommand: {
+                          token: "next-page",
+                          request: "CONTINUATION_REQUEST_TYPE_BROWSE",
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    };
+    const next = {
+      onResponseReceivedActions: [
+        {
+          appendContinuationItemsAction: {
+            continuationItems: [
+              {
+                lockupViewModel: {
+                  contentId: "T6juU_4UqKI",
+                  contentType: "LOCKUP_CONTENT_TYPE_VIDEO",
+                },
+              },
+              {
+                lockupViewModel: {
+                  contentId: "lmnopqrstuv",
+                  contentType: "LOCKUP_CONTENT_TYPE_VIDEO",
+                  metadata: {
+                    lockupMetadataViewModel: {
+                      title: { content: "Last interview" },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      ],
+    };
+    const requests: { url: string; body: unknown }[] = [];
+    async function fetchPage(
+      input: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1],
+    ) {
+      requests.push({
+        url:
+          typeof input === "object" && "url" in input
+            ? input.url
+            : String(input),
+        body: JSON.parse(String(init?.body)),
+      });
+      return Response.json(requests.length === 1 ? first : next);
+    }
+    fetchPage.preconnect = fetch.preconnect;
+    const yt = await Innertube.create({
+      generate_session_locally: true,
+      retrieve_player: false,
+      retrieve_innertube_config: false,
+      fetch: fetchPage,
+    });
+
+    const page = await fetchPlaylist(yt, "PLtest");
+    expect(page.messages.map((message) => message.text.toString())).toEqual([
+      "Expert interviews",
+    ]);
+    const initial = playlistPage(page);
+    expect(initial.suspicious).toEqual(false);
+    expect(initial.count).toEqual("3 episodes");
+    expect(initial.continuation).toEqual(true);
+    expect(initial.title).toEqual("Interviews");
+
+    const continued = playlistPage(await page.getContinuation());
+    expect(continued.continuation).toEqual(false);
+    expect(continued.suspicious).toEqual(false);
+    expect(
+      [...initial.videos, ...continued.videos].map(({ id, available }) => ({
+        id,
+        available,
+      })),
+    ).toEqual([
+      { id: "abcdefghijk", available: true },
+      { id: "T6juU_4UqKI", available: false },
+      { id: "lmnopqrstuv", available: true },
+    ]);
+    expect(continued.videos[0]).toEqual({
+      id: "T6juU_4UqKI",
+      title: "T6juU_4UqKI",
+      duration: 0,
+      available: false,
+      published_text: null,
+    });
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/youtubei/v1/browse",
+      "/youtubei/v1/browse",
+    ]);
+    expect(requests[0].body).toMatchObject({
+      browseId: "VLPLtest",
+      params: "wgYCCAA=",
+    });
+    expect(requests[1].body).toMatchObject({ continuation: "next-page" });
+  });
+
+  test.each(["WARNING", "ERROR"])(
+    "still rejects %s playlist alerts",
+    async (type) => {
+      const yt = await Innertube.create({
+        generate_session_locally: true,
+        retrieve_player: false,
+        retrieve_innertube_config: false,
+      });
+      const page = new YT.Playlist(yt.actions, {
+        success: true,
+        status_code: 200,
+        data: {
+          contents: { playlistVideoListRenderer: { contents: [] } },
+          alerts: [
+            {
+              alertWithButtonRenderer: {
+                type,
+                text: { simpleText: "Listing failed" },
+              },
+            },
+          ],
+        },
+      });
+      expect(playlistPage(page).suspicious).toEqual(true);
+    },
+  );
 });

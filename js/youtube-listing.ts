@@ -1,4 +1,32 @@
-import { Helpers, YTNodes } from "youtubei.js";
+import { Helpers, type Innertube, YT, YTNodes } from "youtubei.js";
+
+export async function fetchPlaylist(yt: Innertube, id: string) {
+  // Include unavailable placeholders so the flat listing matches the advertised count.
+  // This is the same browse parameter used by yt-dlp's YouTube playlist extractor.
+  const response = await yt.actions.execute("/browse", {
+    browseId: `VL${id}`,
+    params: "wgYCCAA=",
+  });
+  return new YT.Playlist(yt.actions, response);
+}
+
+export function playlistPage(page: YT.Playlist) {
+  return {
+    title: page.info.title,
+    description: page.info.description || "",
+    cover_url: page.info.thumbnails?.[0]?.url || null,
+    count: page.info.total_items,
+    continuation: page.has_continuation,
+    // Message renderers also contain podcast descriptions, not just listing notices.
+    suspicious:
+      page.page.alerts?.some(
+        (alert) =>
+          alert.is(YTNodes.Alert, YTNodes.AlertWithButton) &&
+          alert.alert_type !== "INFO",
+      ) || false,
+    videos: page.items.map(playlistEntry),
+  };
+}
 
 export function playlistEntry(item: Helpers.YTNode) {
   if (item.is(YTNodes.PlaylistVideo))
@@ -17,7 +45,8 @@ export function playlistEntry(item: Helpers.YTNode) {
       id: item.content_id,
       title: item.metadata?.title.toString() || item.content_id,
       duration: 0,
-      available: true,
+      // Unavailable modern entries retain their ID but omit metadata entirely.
+      available: !!item.metadata?.title.toString(),
       // The final metadata row contains views and age; preceding rows name the author.
       published_text:
         item.metadata?.metadata?.metadata_rows

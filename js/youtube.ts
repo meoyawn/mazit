@@ -6,7 +6,7 @@ import {
   Log,
   Constants,
 } from "youtubei.js";
-import { playlistEntry } from "./youtube-listing.ts";
+import { fetchPlaylist, playlistPage } from "./youtube-listing.ts";
 import { selectAudioFormat } from "./youtube-media.ts";
 
 declare function hostFetch(request: string): Promise<string>;
@@ -110,21 +110,12 @@ async function operation(method: string, json: string): Promise<string> {
     const page =
       args.continuation && previous
         ? await previous.getContinuation()
-        : await yt.getPlaylist(args.id);
+        : await fetchPlaylist(yt, args.id);
     if (page.has_continuation) pages.set(args.id, page);
     else pages.delete(args.id);
     // args.id is a playlist ID (including a channel's UU uploads playlist).
     // WEB listing pages already contain date labels; no per-video player lookups.
-    const videos = page.items.map(playlistEntry);
-    return JSON.stringify({
-      title: page.info.title,
-      description: page.info.description || "",
-      cover_url: page.info.thumbnails?.[0]?.url || null,
-      count: page.info.total_items,
-      continuation: page.has_continuation,
-      suspicious: !!page.messages?.length,
-      videos,
-    });
+    return JSON.stringify(playlistPage(page));
   }
   if (method === "channel") {
     const channel = await yt.getChannel(args.id);

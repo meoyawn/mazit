@@ -507,6 +507,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unavailable_placeholders_count_toward_a_complete_listing() {
+        let youtube = YouTube::with_responses(vec![
+            (
+                "page",
+                json!({"id": "PLtest", "continuation": false}),
+                json!({
+                    "title": "Interviews", "count": "3 episodes", "continuation": true,
+                    "suspicious": false,
+                    "videos": [{"id": "abcdefghijk", "title": "First", "duration": 0, "available": true}]
+                }),
+            ),
+            (
+                "page",
+                json!({"id": "PLtest", "continuation": true}),
+                json!({
+                    "continuation": false, "suspicious": false,
+                    "videos": [
+                        {"id": "T6juU_4UqKI", "title": "T6juU_4UqKI", "duration": 0, "available": false},
+                        {"id": "lmnopqrstuv", "title": "Last", "duration": 0, "available": true}
+                    ]
+                }),
+            ),
+        ]);
+        let snapshot = youtube.snapshot("playlist", "PLtest").await.unwrap();
+        assert_eq!(snapshot.videos.len(), 3);
+        assert!(!snapshot.videos[1].available);
+        assert_eq!(
+            snapshot
+                .videos
+                .iter()
+                .filter(|video| video.available)
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_or_suspicious_listings_are_still_rejected() {
+        for (count, suspicious) in [
+            (Some("2 episodes"), false),
+            (None, false),
+            (Some("1 episode"), true),
+        ] {
+            let youtube = YouTube::with_responses(vec![(
+                "page",
+                json!({"id": "PLtest", "continuation": false}),
+                json!({
+                    "count": count, "suspicious": suspicious,
+                    "videos": [{"id": "abcdefghijk", "title": "First", "duration": 0, "available": true}]
+                }),
+            )]);
+            let error = youtube.snapshot("playlist", "PLtest").await.err().unwrap();
+            assert!(error.to_string().contains("Incomplete YouTube listing"));
+        }
+    }
+
+    #[tokio::test]
     async fn audio_resolution_keeps_visionos_and_does_not_require_web_metadata() {
         let youtube = YouTube::with_responses(vec![(
             "media",

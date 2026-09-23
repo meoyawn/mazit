@@ -10,4 +10,6 @@ SQLite stores durable sync checkpoints, not application settings. Keep configura
 
 Playlist/channel sync and diffing must use flat playlist pages, including continuations. Extract dates from listing metadata; never expand each video to fill metadata. Only audio downloads may fetch per-video info, using the media client documented in `innertube.md`.
 
+When investigating YouTube videos, playlists, or channels, use `yt-dlp` to inspect and cross-check metadata, availability, and listing behavior. For playlist/channel checks, use `--flat-playlist` and verify all continuation pages without downloading media or expanding individual videos.
+
 Verify desktop UI changes with the GPUI test harness (`task test:ui`), not computer use or screenshots of the running app. Follow `docs/testing.md` for simulated input, layout bounds, and artwork clipping checks.
