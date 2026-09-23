@@ -17,12 +17,12 @@ Use this configuration:
 
 R2 Standard currently includes these monthly allowances:
 
-| Item | Included usage |
-| --- | --- |
-| Storage | 10 GB-month |
-| Class A operations, including uploads | 1 million |
-| Class B operations, including reads | 10 million |
-| Internet egress | Free |
+| Item                                  | Included usage |
+| ------------------------------------- | -------------- |
+| Storage                               | 10 GB-month    |
+| Class A operations, including uploads | 1 million      |
+| Class B operations, including reads   | 10 million     |
+| Internet egress                       | Free           |
 
 Above the allowances, storage is $0.015/GB-month, Class A operations are $4.50/million, and Class B operations are $0.36/million, subject to billing-unit rounding. **A storage-only bill requires keeping operations within their free allowances.** CDN misses, uncached feed reads, and multipart uploads still consume operations. See [R2 pricing](https://developers.cloudflare.com/r2/pricing/).
 
@@ -30,10 +30,10 @@ Check **Manage Account → Billing → Billable Usage** and R2 operation totals.
 
 ## The two connections
 
-| Connection | Address | Purpose |
-| --- | --- | --- |
-| Mazit → R2 | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` | Authenticated uploads and deletes using S3 credentials. |
-| Podcast player → Cloudflare → R2 | `https://audio.example.com` | Public RSS and audio, with CDN caching on the read path. |
+| Connection                       | Address                                         | Purpose                                                  |
+| -------------------------------- | ----------------------------------------------- | -------------------------------------------------------- |
+| Mazit → R2                       | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` | Authenticated uploads and deletes using S3 credentials.  |
+| Podcast player → Cloudflare → R2 | `https://audio.example.com`                     | Public RSS and audio, with CDN caching on the read path. |
 
 Use **`auto` as the S3 region**. `EEUR` is a physical location, not a signing region. R2 also accepts `us-east-1` as an alias. See [R2’s region reference](https://developers.cloudflare.com/r2/api/s3/api/#bucket-region).
 
@@ -77,15 +77,15 @@ Reference: [R2 authentication](https://developers.cloudflare.com/r2/api/tokens/)
 
 ## 3. Fill in Mazit’s storage form
 
-| Field | Value | Notes |
-| --- | --- | --- |
-| S3 endpoint | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` | Copy the S3 API hostname from the bucket settings. Remove the trailing `/podcasts`; Mazit supplies the bucket separately. |
-| Region | `auto` | Do not use `EEUR`. |
-| Bucket | `podcasts` | Bucket name only. |
-| Folder prefix / path | `mazit` | Optional; blank is also valid. Choose before creating subscriptions. |
-| Public base URL | `https://audio.example.com` | The public bucket origin, without the bucket name or folder prefix. |
-| Access key ID | Your generated Access Key ID | From the R2 token creation screen. |
-| Secret access key | Your generated Secret Access Key | From the same screen. |
+| Field                | Value                                           | Notes                                                                                                                     |
+| -------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| S3 endpoint          | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` | Copy the S3 API hostname from the bucket settings. Remove the trailing `/podcasts`; Mazit supplies the bucket separately. |
+| Region               | `auto`                                          | Do not use `EEUR`.                                                                                                        |
+| Bucket               | `podcasts`                                      | Bucket name only.                                                                                                         |
+| Folder prefix / path | `mazit`                                         | Optional; blank is also valid. Choose before creating subscriptions.                                                      |
+| Public base URL      | `https://audio.example.com`                     | The public bucket origin, without the bucket name or folder prefix.                                                       |
+| Access key ID        | Your generated Access Key ID                    | From the R2 token creation screen.                                                                                        |
+| Secret access key    | Your generated Secret Access Key                | From the same screen.                                                                                                     |
 
 For jurisdiction-restricted buckets, retain the jurisdiction-specific S3 hostname shown by Cloudflare, such as `.eu.r2.cloudflarestorage.com`. A location hint such as EEUR does not itself imply that endpoint. See [R2 endpoint requirements](https://developers.cloudflare.com/r2/api/tokens/).
 
@@ -112,11 +112,11 @@ Once connected, add a playlist or channel, let synchronization finish, and selec
 
 The current uploader sets:
 
-| Object | Content-Type | Cache-Control |
-| --- | --- | --- |
-| Audio `.m4a` | `audio/mp4` | `public, max-age=3600` |
-| Feed `rss.xml` | `application/rss+xml; charset=utf-8` | `no-cache` |
-| Temporary connection probe | `text/plain` | `no-cache` |
+| Object                     | Content-Type                         | Cache-Control          |
+| -------------------------- | ------------------------------------ | ---------------------- |
+| Audio `.m4a`               | `audio/mp4`                          | `public, max-age=3600` |
+| Feed `rss.xml`             | `application/rss+xml; charset=utf-8` | `no-cache`             |
+| Temporary connection probe | `text/plain`                         | `no-cache`             |
 
 `no-cache` allows storage but requires validation before reuse; it is different from `no-store`. The following recipe explicitly bypasses the edge cache for feeds and probes. See [Origin Cache Control](https://developers.cloudflare.com/cache/concepts/cache-control/).
 
@@ -191,12 +191,12 @@ curl -sS -D - -o /dev/null --max-time 120 \
 
 This downloads the full episode to `/dev/null`; start with a small file and let each request complete. A full GET provides a clearer cache-fill check than HEAD alone.
 
-| Response | Meaning |
-| --- | --- |
-| `CF-Cache-Status: HIT` | Served from cache. `Age` usually reports its age in seconds. |
-| `MISS` | The request missed; an eligible response may fill the cache. |
-| `REVALIDATED` | A cached object was checked and found unchanged. |
-| `DYNAMIC` or `BYPASS` | Investigate rules and headers for audio. Uncached behavior is intentional for RSS in this recipe. |
+| Response               | Meaning                                                                                           |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `CF-Cache-Status: HIT` | Served from cache. `Age` usually reports its age in seconds.                                      |
+| `MISS`                 | The request missed; an eligible response may fill the cache.                                      |
+| `REVALIDATED`          | A cached object was checked and found unchanged.                                                  |
+| `DYNAMIC` or `BYPASS`  | Investigate rules and headers for audio. Uncached behavior is intentional for RSS in this recipe. |
 
 A second-request HIT is useful evidence, not a guarantee: routing, fills, and eviction affect the result. See [cache response meanings](https://developers.cloudflare.com/cache/concepts/cache-responses/).
 
@@ -247,15 +247,15 @@ Shared RSS caching could use a short origin-provided TTL such as `public, max-ag
 
 ## Troubleshooting
 
-| Problem | Check |
-| --- | --- |
-| Signature error or AccessDenied | Region `auto`, correct S3 hostname, no bucket suffix in endpoint, generated key pair, bucket scope, expiry/IP restrictions, and accurate system clock. |
-| Upload works but connection verification fails | Active public domain, correct bucket and prefix, raw file access without login/challenges, and permission to delete the probe. Bucket locks can prevent cleanup. |
-| Domain root returns an error | Test an actual object URL; public R2 does not list the bucket at its root. |
-| Audio never hits cache | Custom hostname, matching rules, rule precedence, headers, object size, Development Mode, and identical URLs without cache busters. |
-| Range request returns full `200` | Valid range, nonempty object, no mismatched `If-Range`, and no encoding/body transformations. |
-| Feed or removed audio is stale | Correct bypass rule and successful publishing; purge previously cached URLs. Players maintain their own refresh schedules and downloaded copies. |
-| Changing the public URL is rejected | An existing library is bound to its destination. Plan a migration or quit Mazit and start a separate library with `--data-dir /absolute/path/to/a/new/library`. This does not migrate subscribers or old files. |
+| Problem                                        | Check                                                                                                                                                                                                           |
+| ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Signature error or AccessDenied                | Region `auto`, correct S3 hostname, no bucket suffix in endpoint, generated key pair, bucket scope, expiry/IP restrictions, and accurate system clock.                                                          |
+| Upload works but connection verification fails | Active public domain, correct bucket and prefix, raw file access without login/challenges, and permission to delete the probe. Bucket locks can prevent cleanup.                                                |
+| Domain root returns an error                   | Test an actual object URL; public R2 does not list the bucket at its root.                                                                                                                                      |
+| Audio never hits cache                         | Custom hostname, matching rules, rule precedence, headers, object size, Development Mode, and identical URLs without cache busters.                                                                             |
+| Range request returns full `200`               | Valid range, nonempty object, no mismatched `If-Range`, and no encoding/body transformations.                                                                                                                   |
+| Feed or removed audio is stale                 | Correct bypass rule and successful publishing; purge previously cached URLs. Players maintain their own refresh schedules and downloaded copies.                                                                |
+| Changing the public URL is rejected            | An existing library is bound to its destination. Plan a migration or quit Mazit and start a separate library with `--data-dir /absolute/path/to/a/new/library`. This does not migrate subscribers or old files. |
 
 ## Launch checklist
 
