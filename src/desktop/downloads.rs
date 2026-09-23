@@ -1,5 +1,5 @@
 use super::*;
-use crate::downloads::{CONCURRENT_TRANSFERS, Download, Phase, RANGES_PER_TRANSFER, RangePhase};
+use crate::downloads::{Download, MAX_TRANSFERS, Phase, RangePhase};
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 
 // gpui-component 0.5.1 uses a 16 px track; its width helper is private.
@@ -60,6 +60,7 @@ impl MazitView {
             });
         }
         let active = count(DownloadFilter::Active);
+        let slots = snapshot.slot_limit;
         let speed: u64 = snapshot.items.iter().map(Download::bytes_per_second).sum();
         let mut items = snapshot
             .items
@@ -86,14 +87,14 @@ impl MazitView {
                         this.engine.downloads.set_paused(!paused);
                         cx.notify();
                     }))))
-            .child(div().text_sm().text_color(rgb(0x68738a)).child(format!(
-                "{active} / {CONCURRENT_TRANSFERS} active · {}/s · All podcasts",
+            .child(div().debug_selector(|| format!("download-slots:{slots}")).text_sm().text_color(rgb(0x68738a)).child(format!(
+                "{active} active · {slots} slots · Auto · {}/s · All podcasts",
                 bytes(speed)
             )))
             .child(div().text_xs().text_color(rgb(0x7d8597)).child(if snapshot.paused {
                 "Queue paused. Active transfers finish uploading and remove their local files.".to_string()
             } else {
-                format!("Up to {CONCURRENT_TRANSFERS} transfers, {RANGES_PER_TRANSFER} ranges each. Local audio is deleted after upload.")
+                format!("Adapts to network speed, up to {MAX_TRANSFERS} transfers. Local audio is deleted after upload.")
             }))
             .child(tabs);
         if items.is_empty() {
@@ -196,19 +197,8 @@ fn download_row(item: &Download) -> Div {
         _ => 0x526bbe,
     };
     let speed = item.bytes_per_second();
-    let progress = if item.total == 0 {
-        if item.phase == Phase::Queued {
-            "Waiting for a transfer slot".into()
-        } else {
-            "Waiting for audio metadata".into()
-        }
-    } else {
-        let mut text = format!(
-            "{} / {} · {}%",
-            bytes(item.received()),
-            bytes(item.total),
-            item.received() * 100 / item.total
-        );
+    let progress = if let Some(percent) = (item.received() * 100).checked_div(item.total) {
+        let mut text = format!("{percent}%");
         if speed > 0 {
             let seconds = item.total.saturating_sub(item.received()).div_ceil(speed);
             text.push_str(&format!(
@@ -219,19 +209,18 @@ fn download_row(item: &Download) -> Div {
             ));
         }
         text
+    } else {
+        if item.phase == Phase::Queued {
+            "Waiting for a transfer slot".into()
+        } else {
+            "Waiting for audio metadata".into()
+        }
     };
-    let ranges = item
-        .ranges
-        .iter()
-        .filter(|range| matches!(range.phase, RangePhase::Active | RangePhase::Retrying))
-        .map(|range| format!("{}–{}", range.start, range.end))
-        .collect::<Vec<_>>();
     let detail = if let Some(error) = &item.error {
         format!("Attempt {}/3 · {error}", item.attempt)
-    } else if !ranges.is_empty() && item.phase == Phase::Downloading {
-        format!("Bytes {}", ranges.join(" · "))
     } else {
         match item.phase {
+            Phase::Downloading => "Receiving audio".into(),
             Phase::Complete => "Uploaded to S3 · Local audio removed".into(),
             Phase::Preparing => "Preparing fast-start M4A".into(),
             Phase::Uploading => "Saving to S3 before removing local audio".into(),

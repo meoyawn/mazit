@@ -276,6 +276,7 @@ fn download_ranges_and_stages_refresh_without_input_and_fit_the_view(cx: &mut Te
         let received = cx
             .debug_bounds("download:playlist:test/first:received:1")
             .unwrap();
+        assert!(cx.debug_bounds("download-slots:2").is_some());
         assert!(row.right() < px(width));
         assert!(row.right() <= scrollbar.left());
         assert!(scrollbar.right() < px(width));

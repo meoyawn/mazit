@@ -8,6 +8,8 @@ Playlist and channel feeds use newest-first episodic ordering, without seasons o
 
 The library shows each subscription once, with its cover, a link to the original YouTube source, sync status, and a compact RSS field with a copy button. Cover images are cached locally so they remain visible after restarting Mazit.
 
+The download manager shows segmented progress, percentage, recent speed, and time remaining. All podcasts share an adaptive transfer budget: start with two slots, sample throughput every five seconds, and probe one additional slot at a time up to sixteen. Keep the extra slot when throughput improves by at least 5%; otherwise restore the previous limit and wait before probing again. Retries, sustained stalls, and sharp slowdowns reduce the limit, down to one slot. Existing transfers finish when the limit decreases or the queue is paused. Each transfer still uses four parallel audio ranges, and its slot stays occupied through conversion and upload.
+
 [Cloudflare R2 setup and CDN guide](docs/cloudflare-r2.md) — storage credentials, free CDN features, request budgets, byte-range playback, and ETag checks.
 
 ## Build and run

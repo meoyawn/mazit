@@ -1,7 +1,7 @@
 use crate::{
     config,
     database::{Database, Episode, Source},
-    downloads::{CONCURRENT_TRANSFERS, DownloadManager, Phase, Transfer},
+    downloads::{DownloadManager, MAX_TRANSFERS, Phase, Transfer},
     network::Cover,
     storage::Storage,
     youtube::YouTube,
@@ -198,7 +198,9 @@ impl Core {
                 changed();
                 outcome
             })
-            .buffer_unordered(CONCURRENT_TRANSFERS)
+            // Keep one admission waiting even at the cap so its worker timer can
+            // detect a stalled connection when there are no progress callbacks.
+            .buffer_unordered(MAX_TRANSFERS + 1)
             .collect::<Vec<_>>()
             .await;
         for outcome in outcomes {
