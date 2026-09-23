@@ -37,7 +37,7 @@ SQLite schema changes live in [`migrations/`](migrations/README.md), with embedd
 - `task test:ui` — run the library's layout and interaction tests without desktop automation. See [UI testing](docs/testing.md).
 - `task check` — run lint and tests together as one check.
 
-The dependency graph is `run → build:debug → prepare` and `build → prepare`. Preparation bundles the YouTube bridge with Bun and runs the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build checksum-verified FFmpeg libraries when missing. JavaScript installation runs before bundling; Rust compilation waits for both the bridge and FFmpeg.
+The dependency graph is `run → build:debug → prepare` and `build → prepare`. Preparation bundles the YouTube bridge with Bun and runs the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build checksum-verified FFmpeg libraries. Task caches JavaScript installation, bundling, and FFmpeg preparation by input checksums and required output files. Changes to the source globs, dependency manifests, build configuration, or preparation script invalidate the relevant cache; missing required outputs rebuild it. JavaScript installation runs before bundling; Rust compilation waits for both the bridge and FFmpeg.
 
 ## Storage configuration
 

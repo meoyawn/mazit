@@ -4,6 +4,7 @@
 /generated/
 /.runtime/
 /.cache/
+/.task/
 /dist/
 .DS_Store
 

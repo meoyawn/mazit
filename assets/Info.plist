@@ -10,6 +10,7 @@
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key><true/>
 <key>NSSupportsAutomaticTermination</key><false/>
 <key>NSSupportsSuddenTermination</key><false/>
 </dict></plist>
