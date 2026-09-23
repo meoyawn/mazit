@@ -324,6 +324,14 @@ fn download_ranges_and_stages_refresh_without_input_and_fit_the_view(cx: &mut Te
         cx.debug_bounds("download:playlist:test/first:Uploading")
             .is_some()
     );
+    transfer.phase(Phase::Skipped);
+    cx.background_executor
+        .advance_clock(Duration::from_millis(500));
+    draw(cx);
+    assert!(
+        cx.debug_bounds("download:playlist:test/first:Skipped")
+            .is_some()
+    );
     transfer.phase(Phase::Complete);
     cx.background_executor
         .advance_clock(Duration::from_millis(500));

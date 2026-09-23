@@ -195,6 +195,13 @@ impl Database {
             })
             .collect())
     }
+    pub fn skip_until_next_sync(&self, source: &str, video: &str) -> Result<()> {
+        self.0.writer.lock().execute(
+            "UPDATE episodes SET available=0,state='skipped' WHERE source IS ? AND id IS ? AND state IS NOT 'uploaded'",
+            params![source, video],
+        )?;
+        Ok(())
+    }
     pub fn forget(&self, source: &str, video: &str) -> Result<()> {
         self.0.writer.lock().execute(
             "DELETE FROM episodes WHERE source IS ? AND id IS ? AND present IS 0",
@@ -236,6 +243,34 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skipped_episodes_become_pending_again_when_the_next_listing_is_available() {
+        let db = Database::open(Path::new(":memory:")).unwrap();
+        let source = db
+            .add("playlist", "test", "https://www.youtube.com")
+            .unwrap();
+        let mut listing = snapshot();
+        listing.videos[0].available = false;
+        db.snapshot(&source, &listing).unwrap();
+        db.skip_until_next_sync(&source, &listing.videos[1].id)
+            .unwrap();
+        assert_eq!(db.pending_episodes(&source).unwrap().len(), 6);
+        assert!(
+            db.episodes(&source).unwrap()[..2]
+                .iter()
+                .all(|episode| episode.state == "skipped" && episode.present)
+        );
+        listing.videos[0].available = true;
+        db.snapshot(&source, &listing).unwrap();
+        assert_eq!(db.pending_episodes(&source).unwrap().len(), 8);
+        assert!(
+            db.episodes(&source)
+                .unwrap()
+                .iter()
+                .all(|episode| episode.state == "pending")
+        );
+    }
 
     #[test]
     fn wal_readers_do_not_wait_for_the_writer_and_use_consistent_snapshots() {

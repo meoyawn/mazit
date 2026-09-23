@@ -53,6 +53,19 @@ pub fn client(cookies: Option<&Path>) -> Result<(Client, Arc<Jar>)> {
         }
         // The source jar is read-only. Set-Cookie updates stay in this process; no file can be corrupted.
     }
+    // Reject optional cookies so anonymous requests receive channel HTML in consent regions.
+    // Preserve an existing consent choice from an imported jar.
+    if !youtube_cookie(&jar).split(';').any(|cookie| {
+        cookie
+            .trim()
+            .strip_prefix("SOCS=")
+            .is_some_and(|value| !value.starts_with("CAA"))
+    }) {
+        jar.add_cookie_str(
+            "SOCS=CAE; Domain=.youtube.com; Path=/; Secure",
+            &url::Url::parse("https://www.youtube.com/")?,
+        );
+    }
     let client = Client::builder()
         .cookie_provider(jar.clone())
         .user_agent("Mozilla/5.0")
@@ -135,6 +148,34 @@ impl Cover {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anonymous_youtube_requests_reject_optional_cookies() {
+        let (_, jar) = client(None).unwrap();
+        assert_eq!(youtube_cookie(&jar), "SOCS=CAE");
+        for origin in [
+            "https://www.youtube.com/",
+            "https://m.youtube.com/",
+            "https://consent.youtube.com/",
+        ] {
+            assert!(jar.cookies(&url::Url::parse(origin).unwrap()).is_some());
+        }
+        for origin in ["http://www.youtube.com/", "https://example.com/"] {
+            assert!(jar.cookies(&url::Url::parse(origin).unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn imported_youtube_consent_is_preserved_without_changing_the_file() {
+        for (stored, expected) in [("CAE", "CAE"), ("CAI", "CAI"), ("CAA", "CAE")] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let contents = format!(".youtube.com\tTRUE\t/\tTRUE\t0\tSOCS\t{stored}\n");
+            std::fs::write(file.path(), &contents).unwrap();
+            let (_, jar) = client(Some(file.path())).unwrap();
+            assert_eq!(youtube_cookie(&jar), format!("SOCS={expected}"));
+            assert_eq!(std::fs::read_to_string(file.path()).unwrap(), contents);
+        }
+    }
 
     #[test]
     fn cover_uses_image_bytes_for_type_and_extension() {

@@ -62,12 +62,16 @@ pub enum Phase {
     Uploading,
     Retrying,
     Complete,
+    Skipped,
     Failed,
 }
 
 impl Phase {
     pub fn active(self) -> bool {
-        !matches!(self, Self::Queued | Self::Complete | Self::Failed)
+        !matches!(
+            self,
+            Self::Queued | Self::Complete | Self::Skipped | Self::Failed
+        )
     }
 
     pub fn label(self) -> &'static str {
@@ -79,6 +83,7 @@ impl Phase {
             Self::Uploading => "Uploading",
             Self::Retrying => "Retrying",
             Self::Complete => "Complete",
+            Self::Skipped => "Skipped",
             Self::Failed => "Failed",
         }
     }
@@ -424,10 +429,12 @@ impl ActiveTransfer {
         if let Err(error) = result {
             self.transfer.error(error);
         }
-        self.transfer.phase(if result.is_ok() {
-            Phase::Complete
-        } else {
-            Phase::Failed
+        self.transfer.update(|item| {
+            if result.is_err() {
+                item.phase = Phase::Failed;
+            } else if item.phase != Phase::Skipped {
+                item.phase = Phase::Complete;
+            }
         });
         self.finished = true;
     }

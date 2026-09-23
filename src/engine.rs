@@ -258,7 +258,15 @@ impl Core {
         let started = Instant::now();
         let id = &episode.video.id;
         log::info!("Resolving audio source={} video={id}", source.id);
-        let request = self.youtube.media(id).await.context("Resolve audio")?;
+        let Some(request) = self.youtube.media(id).await.context("Resolve audio")? else {
+            self.db.skip_until_next_sync(&source.id, id)?;
+            log::info!(
+                "Skipping live or upcoming video until next sync source={} video={id}",
+                source.id
+            );
+            transfer.phase(Phase::Skipped);
+            return Ok(());
+        };
         let directory = self.transfer_directory(source);
         std::fs::create_dir_all(&directory)?;
         with_transfer_directory(&directory, |temp| async move {
@@ -763,6 +771,90 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
         thread::JoinHandle,
     };
+
+    #[tokio::test]
+    async fn deferred_episodes_do_not_retry_or_block_publication_and_are_rechecked_next_sync() {
+        use serde_json::json;
+        for initially_available in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut core = Core::new(directory.path().to_path_buf(), None).unwrap();
+            let source = core
+                .db
+                .add(
+                    "playlist",
+                    "PLtest",
+                    "https://www.youtube.com/playlist?list=PLtest",
+                )
+                .unwrap();
+            let page = |available| {
+                json!({
+                    "title": "Scheduled episodes", "count": "1 video", "continuation": false,
+                    "videos": [{ "id": "AmUPnXrZ9J0", "title": "N64", "duration": 0, "available": available }]
+                })
+            };
+            let mut responses = vec![(
+                "page",
+                json!({"id": "PLtest", "continuation": false}),
+                page(initially_available),
+            )];
+            if initially_available {
+                responses.push((
+                    "media",
+                    json!({"id": "AmUPnXrZ9J0", "client": "VISIONOS"}),
+                    json!(null),
+                ));
+            }
+            responses.push((
+                "page",
+                json!({"id": "PLtest", "continuation": false}),
+                page(true),
+            ));
+            responses.push((
+                "media",
+                json!({"id": "AmUPnXrZ9J0", "client": "VISIONOS"}),
+                json!(null),
+            ));
+            core.youtube = YouTube::with_responses(responses);
+            let mock = MockStorage::new(false);
+            let workers = TaskTracker::new();
+            for sync in 0..2 {
+                core.sync_inner(&source, &mock.storage, &|| {}, &workers)
+                    .await
+                    .unwrap();
+                assert!(core.db.pending_episodes(&source).unwrap().is_empty());
+                let episodes = core.db.episodes(&source).unwrap();
+                assert_eq!(episodes[0].state, "skipped");
+                assert!(episodes[0].present);
+                let transfers = core.downloads.snapshot();
+                assert_eq!(
+                    transfers.items.len(),
+                    usize::from(initially_available || sync > 0)
+                );
+                for transfer in transfers.items {
+                    assert_eq!(transfer.phase, Phase::Skipped);
+                    assert!(!transfer.phase.active());
+                    assert_eq!(transfer.attempt, 1);
+                    assert!(transfer.error.is_none());
+                }
+                let source = core.db.source(&source).unwrap();
+                assert_eq!(source.phase, "idle");
+                assert!(source.error.is_none());
+                assert!(source.feed_url.is_some());
+            }
+            let uploads = mock.uploads.lock();
+            assert_eq!(uploads.len(), 2);
+            assert!(
+                uploads
+                    .iter()
+                    .all(|upload| upload.path().ends_with("/rss.xml"))
+            );
+            assert!(
+                !core
+                    .transfer_directory(&core.db.source(&source).unwrap())
+                    .exists()
+            );
+        }
+    }
 
     struct Upload {
         headers: String,

@@ -285,17 +285,20 @@ impl YouTube {
             videos,
         })
     }
-    pub async fn media(&self, id: &str) -> Result<MediaRequest> {
-        let mut media: MediaRequest = serde_json::from_value(
+    pub async fn media(&self, id: &str) -> Result<Option<MediaRequest>> {
+        let Some(mut media): Option<MediaRequest> = serde_json::from_value(
             self.call("media", json!({"id": id, "client": "VISIONOS"}))
                 .await?,
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         media.published = media
             .published
             .as_deref()
             .and_then(parse_publication_date)
             .map(|date| date.to_rfc3339());
-        Ok(media)
+        Ok(Some(media))
     }
 }
 
@@ -383,6 +386,40 @@ async fn fetch_metadata(client: Client, json: String) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "live YouTube check using the application's add and flat listing paths"]
+    async fn live_handle_subscription_through_app_client() {
+        let directory = tempfile::tempdir().unwrap();
+        let core = crate::engine::Core::new(directory.path().to_path_buf(), None).unwrap();
+        for url in [
+            "https://www.youtube.com/@RyanFleury/videos",
+            "https://www.youtube.com/@RyanFleury/",
+        ] {
+            let id = core.add(url).await.unwrap();
+            assert_eq!(id, "channel:UCCsdwE2z_kRL3vfVsd5OGyA");
+        }
+        let sources = core.db.sources().unwrap();
+        assert_eq!(sources.len(), 1);
+        let source = &sources[0];
+        assert_eq!(source.kind, "channel");
+        assert_eq!(source.youtube_id, "UCCsdwE2z_kRL3vfVsd5OGyA");
+        assert_eq!(
+            source.url,
+            "https://www.youtube.com/channel/UCCsdwE2z_kRL3vfVsd5OGyA"
+        );
+        let snapshot = core
+            .youtube
+            .snapshot(&source.kind, &source.youtube_id)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.title, "Ryan Fleury");
+        assert!(!snapshot.videos.is_empty());
+        eprintln!("Live channel listing: {} videos", snapshot.videos.len());
+        for video in snapshot.videos.iter().filter(|video| !video.available) {
+            eprintln!("Skipped in live listing: {} ({})", video.title, video.id);
+        }
+    }
 
     #[tokio::test]
     async fn handle_urls_share_the_canonical_channel_identity() {
@@ -599,7 +636,7 @@ mod tests {
                 "duration": 300, "published": null
             }),
         )]);
-        let media = youtube.media("FAaMG_3Lwug").await.unwrap();
+        let media = youtube.media("FAaMG_3Lwug").await.unwrap().unwrap();
         assert!(media.published.is_none());
         assert_eq!(media.user_agent, "VISIONOS");
     }

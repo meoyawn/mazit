@@ -34,7 +34,11 @@ export function playlistEntry(item: Helpers.YTNode) {
       id: item.id,
       title: item.title.toString(),
       duration: item.duration.seconds || 0,
-      available: item.is_playable && !item.is_live && !item.is_upcoming,
+      available:
+        item.is_playable &&
+        !item.is_live &&
+        !item.is_upcoming &&
+        !item.upcoming,
       published_text: item.video_info.toString(),
     };
   if (
@@ -46,7 +50,8 @@ export function playlistEntry(item: Helpers.YTNode) {
       title: item.metadata?.title.toString() || item.content_id,
       duration: 0,
       // Unavailable modern entries retain their ID but omit metadata entirely.
-      available: !!item.metadata?.title.toString(),
+      available:
+        !!item.metadata?.title.toString() && !hasLiveOrUpcomingBadge(item),
       // The final metadata row contains views and age; preceding rows name the author.
       published_text:
         item.metadata?.metadata?.metadata_rows
@@ -55,4 +60,20 @@ export function playlistEntry(item: Helpers.YTNode) {
           ?.text?.toString() || null,
     };
   throw new Error("Unsupported playlist item; listing is incomplete.");
+}
+
+function hasLiveOrUpcomingBadge(item: YTNodes.LockupView): boolean {
+  if (!item.content_image?.is(YTNodes.ThumbnailView)) return false;
+  return item.content_image.overlays.some(
+    (overlay) =>
+      overlay.is(
+        YTNodes.ThumbnailOverlayBadgeView,
+        YTNodes.ThumbnailBottomOverlayView,
+      ) &&
+      overlay.badges.some(
+        (badge) =>
+          badge.badge_style === "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE" ||
+          badge.text?.trim().toLowerCase() === "upcoming",
+      ),
+  );
 }

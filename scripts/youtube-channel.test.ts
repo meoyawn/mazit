@@ -74,6 +74,16 @@ describe("channel URL resolution", () => {
     ).rejects.toThrow("Channel not found in YouTube page");
   });
 
+  test("reports a consent redirect instead of claiming the channel is missing", async () => {
+    async function fetchPage() {
+      return new Response(`<html><title>Before you continue to YouTube</title>
+        <form action="https://consent.youtube.com/save" method="POST"></form></html>`);
+    }
+    await expect(
+      resolveChannel("https://www.youtube.com/@RyanFleury/", fetchPage),
+    ).rejects.toThrow("YouTube returned a consent page instead of the channel");
+  });
+
   test.each([404, 429, 500])(
     "reports HTTP %s without reading channel metadata",
     async (status) => {

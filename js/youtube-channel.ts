@@ -28,6 +28,11 @@ export async function resolveChannel(
   const id = canonical?.match(
     /^https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{22})\/?$/,
   )?.[1];
-  if (!id) throw new Error("Channel not found in YouTube page");
+  if (!id) {
+    if (html.includes("https://consent.youtube.com/")) {
+      throw new Error("YouTube returned a consent page instead of the channel");
+    }
+    throw new Error("Channel not found in YouTube page");
+  }
   return id;
 }

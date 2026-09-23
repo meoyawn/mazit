@@ -7,6 +7,87 @@ import {
 } from "../js/youtube-listing.ts";
 
 describe("flat playlist metadata", () => {
+  test.each(["LIVE", "UPCOMING", "scheduled"])(
+    "skips classic %s entries while retaining their identity",
+    (status) => {
+      const item = new YTNodes.PlaylistVideo({
+        videoId: "AmUPnXrZ9J0",
+        title: {
+          simpleText: "N64 3D Rendering From Scratch",
+          accessibility: { accessibilityData: { label: "N64" } },
+        },
+        isPlayable: true,
+        thumbnailOverlays:
+          status === "scheduled"
+            ? []
+            : [{ thumbnailOverlayTimeStatusRenderer: { style: status } }],
+        upcomingEventData:
+          status === "scheduled" ? { startTime: "1790812800" } : undefined,
+      });
+      expect(playlistEntry(item)).toMatchObject({
+        id: "AmUPnXrZ9J0",
+        available: false,
+      });
+    },
+  );
+
+  test.each([
+    "thumbnailBottomOverlayViewModel",
+    "thumbnailOverlayBadgeViewModel",
+  ])(
+    "reads live/upcoming state from %s without excluding archived streams",
+    (overlayType) => {
+      for (const [text, badgeStyle, available] of [
+        ["Upcoming", "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT", false],
+        ["NA ŻYWO", "THUMBNAIL_OVERLAY_BADGE_STYLE_LIVE", false],
+        ["1:02:03", "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT", true],
+      ] as const) {
+        const badgeKey =
+          overlayType === "thumbnailBottomOverlayViewModel"
+            ? "badges"
+            : "thumbnailBadges";
+        const item = new YTNodes.LockupView({
+          contentId: "AmUPnXrZ9J0",
+          contentType: "LOCKUP_CONTENT_TYPE_VIDEO",
+          contentImage: {
+            thumbnailViewModel: {
+              image: { sources: [] },
+              overlays: [
+                {
+                  [overlayType]: {
+                    [badgeKey]: [
+                      { thumbnailBadgeViewModel: { text, badgeStyle } },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+          metadata: {
+            lockupMetadataViewModel: {
+              title: { content: "N64 3D Rendering From Scratch" },
+              metadata: {
+                contentMetadataViewModel: {
+                  metadataRows: [
+                    {
+                      metadataParts: [
+                        { text: { content: "Streamed 2 days ago" } },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        });
+        expect(playlistEntry(item)).toMatchObject({
+          id: "AmUPnXrZ9J0",
+          available,
+        });
+      }
+    },
+  );
+
   test("reads age from the classic renderer's videoInfo", () => {
     const item = new YTNodes.PlaylistVideo({
       videoId: "FAaMG_3Lwug",

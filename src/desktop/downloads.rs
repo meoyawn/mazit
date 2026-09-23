@@ -192,7 +192,7 @@ fn download_row(item: &Download) -> Div {
     let color = match item.phase {
         Phase::Complete => 0x36826c,
         Phase::Failed => 0xb64c48,
-        Phase::Queued => 0x7d8597,
+        Phase::Queued | Phase::Skipped => 0x7d8597,
         Phase::Retrying => 0xc38b3e,
         _ => 0x526bbe,
     };
@@ -212,6 +212,8 @@ fn download_row(item: &Download) -> Div {
     } else {
         if item.phase == Phase::Queued {
             "Waiting for a transfer slot".into()
+        } else if item.phase == Phase::Skipped {
+            "No download needed this sync".into()
         } else {
             "Waiting for audio metadata".into()
         }
@@ -222,6 +224,7 @@ fn download_row(item: &Download) -> Div {
         match item.phase {
             Phase::Downloading => "Receiving audio".into(),
             Phase::Complete => "Uploaded to S3 · Local audio removed".into(),
+            Phase::Skipped => "Live or upcoming · Checked again next sync".into(),
             Phase::Preparing => "Preparing fast-start M4A".into(),
             Phase::Uploading => "Saving to S3 before removing local audio".into(),
             Phase::Queued => "Starts automatically when a slot is available".into(),

@@ -7,7 +7,7 @@ import {
   Constants,
 } from "youtubei.js";
 import { fetchPlaylist, playlistPage } from "./youtube-listing.ts";
-import { selectAudioFormat } from "./youtube-media.ts";
+import { selectDownloadableAudio } from "./youtube-media.ts";
 import { resolveChannel } from "./youtube-channel.ts";
 
 declare function hostFetch(request: string): Promise<string>;
@@ -133,15 +133,8 @@ async function operation(method: string, json: string): Promise<string> {
   if (method === "media") {
     // args.id is a video ID. Only an audio download may request per-video info.
     const info = await yt.getBasicInfo(args.id, { client: args.client });
-    if (info.playability_status?.status !== "OK")
-      throw new Error(
-        `YouTube playback unavailable: ${info.playability_status?.reason || "unknown reason"}`,
-      );
-    if (info.basic_info.is_live || info.basic_info.is_upcoming)
-      throw new Error("Video is live or upcoming.");
-    const selected = selectAudioFormat(
-      info.streaming_data?.adaptive_formats || [],
-    );
+    const selected = selectDownloadableAudio(info);
+    if (!selected) return JSON.stringify(null);
     const microformat = info.page[0].microformat;
     const published = microformat?.is(YTNodes.PlayerMicroformat)
       ? microformat.publish_date || microformat.upload_date
