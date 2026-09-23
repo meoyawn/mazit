@@ -61,6 +61,9 @@ pub fn parse_publication_date(date: &str) -> Option<chrono::DateTime<chrono::Utc
 pub struct MediaRequest {
     pub url: String,
     pub bytes: u64,
+    pub itag: u32,
+    pub mime_type: String,
+    pub bitrate: u64,
     pub user_agent: String,
     pub title: String,
     pub description: String,
@@ -510,6 +513,7 @@ mod tests {
             json!({"id": "FAaMG_3Lwug", "client": "VISIONOS"}),
             json!({
                 "url": "https://example.googlevideo.com/audio", "bytes": 12,
+                "itag": 140, "mime_type": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 128000,
                 "user_agent": "VISIONOS", "title": "Showdown", "description": "",
                 "duration": 300, "published": null
             }),

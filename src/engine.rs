@@ -224,10 +224,22 @@ impl Core {
             .tempdir_in(self.directory.join("transfers"))?;
         let input = temp.path().join("download");
         let output = temp.path().join("audio.m4a");
-        log::info!("Downloading audio video={id} bytes={}", request.bytes);
+        log::info!(
+            "Downloading audio video={id} itag={} mime={} bitrate={} bytes={}",
+            request.itag,
+            request.mime_type,
+            request.bitrate,
+            request.bytes
+        );
+        let download_started = Instant::now();
         crate::network::download(&self.client, &request, &input)
             .await
             .context("Download audio")?;
+        log::info!(
+            "Downloaded audio video={id} elapsed={:.1}s speed={:.2} MiB/s",
+            download_started.elapsed().as_secs_f64(),
+            request.bytes as f64 / 1048576.0 / download_started.elapsed().as_secs_f64()
+        );
         log::info!("Preparing M4A video={id}");
         let audio = output.clone();
         let bytes = tokio::task::spawn_blocking(move || crate::audio::prepare_m4a(&input, &audio))

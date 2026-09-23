@@ -37,6 +37,12 @@ pub fn prepare_m4a(input: &Path, output: &Path) -> Result<u64> {
 }
 fn convert(input: &Path, output: &Path) -> Result<()> {
     let mut input = format::input(input)?;
+    ensure!(
+        input
+            .streams()
+            .all(|stream| stream.parameters().medium() != media::Type::Video),
+        "Expected audio-only media; refusing a video download"
+    );
     let source = input
         .streams()
         .best(media::Type::Audio)
@@ -46,11 +52,13 @@ fn convert(input: &Path, output: &Path) -> Result<()> {
     let parameters = source.parameters();
     let mut output = format::output_as(output, "ipod")?;
     if parameters.id() != codec::Id::AAC {
+        log::info!("Converting audio-only fallback to AAC/M4A");
         let decoder = codec::Context::from_parameters(parameters)?
             .decoder()
             .audio()?;
         return transcode(input, output, index, decoder);
     }
+    log::info!("Remuxing AAC to fast-start M4A without re-encoding");
     {
         let mut stream = output.add_stream(ffmpeg::encoder::find(codec::Id::None))?;
         stream.set_parameters(parameters);

@@ -7,6 +7,7 @@ import {
   Constants,
 } from "youtubei.js";
 import { playlistEntry } from "./youtube-listing.ts";
+import { selectAudioFormat } from "./youtube-media.ts";
 
 declare function hostFetch(request: string): Promise<string>;
 declare function hostCookie(): string;
@@ -145,23 +146,9 @@ async function operation(method: string, json: string): Promise<string> {
       );
     if (info.basic_info.is_live || info.basic_info.is_upcoming)
       throw new Error("Video is live or upcoming.");
-    const formats =
-      info.streaming_data?.adaptive_formats.filter(
-        (item) =>
-          item.has_audio &&
-          !item.has_video &&
-          !item.drm_families?.length &&
-          !item.is_type_otf &&
-          !!(item.url || item.cipher || item.signature_cipher),
-      ) || [];
-    const aac = formats.filter(
-      (item) =>
-        item.mime_type.includes("audio/mp4") && item.mime_type.includes("mp4a"),
+    const selected = selectAudioFormat(
+      info.streaming_data?.adaptive_formats || [],
     );
-    const selected = (aac.length ? aac : formats).sort(
-      (a, b) => b.bitrate - a.bitrate,
-    )[0];
-    if (!selected) throw new Error("No downloadable audio format.");
     const microformat = info.page[0].microformat;
     const published = microformat?.is(YTNodes.PlayerMicroformat)
       ? microformat.publish_date || microformat.upload_date
@@ -187,6 +174,9 @@ async function operation(method: string, json: string): Promise<string> {
     return JSON.stringify({
       url: url.toString(),
       bytes: selected.content_length || 0,
+      itag: selected.itag,
+      mime_type: selected.mime_type,
+      bitrate: selected.bitrate,
       user_agent: userAgent,
       title: info.basic_info.title || args.id,
       description: info.basic_info.short_description || "",
