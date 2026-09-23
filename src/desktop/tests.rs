@@ -220,12 +220,28 @@ fn episode_count_opens_the_global_queue_even_during_sync(cx: &mut TestAppContext
         cx.debug_bounds("download:other/0").unwrap().top(),
         first_row_top
     );
-    view.update(cx, |view, _| {
-        view.download_scroll
-            .scroll_to_item(503, gpui::ScrollStrategy::Top)
-    });
+    let scrollbar = cx.debug_bounds("downloads-scrollbar").unwrap();
+    let first_row = cx.debug_bounds("download:other/0").unwrap();
+    assert!(scrollbar.size.width > px(0.) && scrollbar.size.height > px(0.));
+    assert!(first_row.right() <= scrollbar.left());
+    // Use the actual scrollbar track without hovering first: it must remain visible
+    // and interactive even while idle, and share the virtual list's scroll handle.
+    cx.simulate_click(
+        point(scrollbar.center().x, scrollbar.bottom() - px(2.)),
+        Modifiers::none(),
+    );
     draw(cx);
-    assert!(cx.debug_bounds("download:other/503").is_some());
+    let last_row = cx.debug_bounds("download:other/503").unwrap();
+    assert!(last_row.top() < scrollbar.bottom() && last_row.bottom() > scrollbar.top());
+    cx.simulate_click(
+        point(scrollbar.center().x, scrollbar.top() + px(2.)),
+        Modifiers::none(),
+    );
+    draw(cx);
+    assert_eq!(
+        cx.debug_bounds("download:other/0").unwrap().top(),
+        first_row_top
+    );
     click(cx, "open-library");
     draw(cx);
     assert!(cx.debug_bounds("playlist:test:downloads").is_some());
@@ -250,6 +266,7 @@ fn download_ranges_and_stages_refresh_without_input_and_fit_the_view(cx: &mut Te
         cx.simulate_resize(size(px(width), px(650.)));
         draw(cx);
         let row = cx.debug_bounds("download:playlist:test/first").unwrap();
+        let scrollbar = cx.debug_bounds("downloads-scrollbar").unwrap();
         let map = cx
             .debug_bounds("download:playlist:test/first:ranges")
             .unwrap();
@@ -260,6 +277,8 @@ fn download_ranges_and_stages_refresh_without_input_and_fit_the_view(cx: &mut Te
             .debug_bounds("download:playlist:test/first:received:1")
             .unwrap();
         assert!(row.right() < px(width));
+        assert!(row.right() <= scrollbar.left());
+        assert!(scrollbar.right() < px(width));
         assert!(map.left() > row.left() && map.right() < row.right());
         assert!(map.bottom() < row.bottom());
         assert!(received.size.width > px(0.));

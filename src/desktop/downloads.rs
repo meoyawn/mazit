@@ -1,5 +1,9 @@
 use super::*;
 use crate::downloads::{CONCURRENT_TRANSFERS, Download, Phase, RANGES_PER_TRANSFER, RangePhase};
+use gpui_component::scroll::{Scrollbar, ScrollbarShow};
+
+// gpui-component 0.5.1 uses a 16 px track; its width helper is private.
+const SCROLLBAR_WIDTH: Pixels = px(16.);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum DownloadFilter {
@@ -112,15 +116,34 @@ impl MazitView {
             );
         } else {
             content = content.child(
-                div().flex_1().min_h_0().overflow_hidden().child(
-                    uniform_list("download-list", items.len(), move |range, _, _| {
-                        range
-                            .map(|index| download_row(&items[index]))
-                            .collect::<Vec<_>>()
-                    })
-                    .size_full()
-                    .track_scroll(self.download_scroll.clone()),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
+                    .pr(SCROLLBAR_WIDTH)
+                    .child(
+                        uniform_list("download-list", items.len(), move |range, _, _| {
+                            range
+                                .map(|index| download_row(&items[index]))
+                                .collect::<Vec<_>>()
+                        })
+                        .size_full()
+                        .track_scroll(self.download_scroll.clone()),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "downloads-scrollbar".into())
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(SCROLLBAR_WIDTH)
+                            .child(
+                                Scrollbar::vertical(&self.download_scroll)
+                                    .scrollbar_show(ScrollbarShow::Always),
+                            ),
+                    ),
             );
         }
         content
