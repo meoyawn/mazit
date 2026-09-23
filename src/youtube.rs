@@ -77,7 +77,7 @@ impl YouTube {
                         })))?;
                         ctx.eval::<(), _>("var console = {log(){},info(){},warn(){},error(){},debug(){}};")?;
                         load_bridge(&ctx)
-                            .inspect_err(|_| { eprintln!("QuickJS initialization: {:?}", ctx.catch()); })
+                            .inspect_err(|_| { log::error!("QuickJS initialization: {:?}", ctx.catch()); })
                     }).await.context("Load embedded YouTube.js")?;
                     Ok::<_, anyhow::Error>((runtime, context))
                 }.await;
@@ -104,7 +104,10 @@ impl YouTube {
                         });
                         let _ = request.result.send(result);
                     },
-                    Err(error) => while let Some(request) = receiver.recv().await { let _ = request.result.send(Err(anyhow!(error.to_string()))); },
+                    Err(error) => {
+                        log::error!("YouTube worker initialization failed: {error:#}");
+                        while let Some(request) = receiver.recv().await { let _ = request.result.send(Err(anyhow!(error.to_string()))); }
+                    },
                 }
             });
         }).expect("Start QuickJS thread");

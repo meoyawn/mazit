@@ -5,7 +5,10 @@ fn main() {
     let logging = match mazit::logging::init() {
         Ok(logging) => logging,
         Err(error) => {
-            eprintln!("{}", mazit::redact(&format!("Initialize application logs: {error:#}")));
+            eprintln!(
+                "{}",
+                mazit::redact(&format!("Initialize application logs: {error:#}"))
+            );
             std::process::exit(1);
         }
     };

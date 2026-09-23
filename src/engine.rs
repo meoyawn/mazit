@@ -10,7 +10,7 @@ use parking_lot::RwLock;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 
@@ -70,6 +70,7 @@ impl Core {
             client.clone(),
             Arc::new(move || crate::network::youtube_cookie(&jar)),
         );
+        log::info!("Library opened");
         Ok(Self {
             db,
             youtube,
@@ -80,6 +81,7 @@ impl Core {
     }
     pub async fn add(&self, url: &str) -> Result<String> {
         let (kind, id, url) = self.youtube.resolve(url).await?;
+        log::info!("Adding subscription {kind}:{id}");
         self.db.add(&kind, &id, &url)
     }
     pub async fn sync(
@@ -88,11 +90,22 @@ impl Core {
         storage: &Storage,
         changed: &(dyn Fn() + Sync),
     ) -> Result<()> {
+        let started = Instant::now();
+        log::info!("Sync started source={id}");
         let result = self.sync_inner(id, storage, changed).await;
         if let Err(error) = &result {
+            log::error!(
+                "Sync failed source={id} elapsed={:.1}s: {error:#}",
+                started.elapsed().as_secs_f64()
+            );
             self.db
-                .phase(id, "error", Some(&crate::redact(&error.to_string())))?;
+                .phase(id, "error", Some(&crate::redact(&format!("{error:#}"))))?;
             self.db.postpone(id)?;
+        } else {
+            log::info!(
+                "Sync completed source={id} elapsed={:.1}s",
+                started.elapsed().as_secs_f64()
+            );
         }
         changed();
         result
@@ -104,9 +117,17 @@ impl Core {
         changed: &(dyn Fn() + Sync),
     ) -> Result<()> {
         let source = self.db.source(id)?;
+        log::info!("Scanning source={id}");
         self.db.phase(id, "scanning", None)?;
         changed();
-        let snapshot = retry(|| self.youtube.snapshot(&source.kind, &source.youtube_id)).await?;
+        let snapshot = retry(&format!("Scan source={id}"), || {
+            self.youtube.snapshot(&source.kind, &source.youtube_id)
+        })
+        .await?;
+        log::info!(
+            "Scan completed source={id} episodes={}",
+            snapshot.videos.len()
+        );
         self.db.snapshot(id, &snapshot)?;
         self.db.phase(id, "downloading", None)?;
         changed();
@@ -116,10 +137,21 @@ impl Core {
             .into_iter()
             .filter(|e| e.present && e.video.available && e.state != "uploaded")
             .collect();
+        log::info!("Transferring source={id} pending={}", pending.len());
         let source_ref = &source;
         let outcomes = stream::iter(pending)
             .map(|episode| async move {
-                let outcome = retry(|| self.transfer(source_ref, &episode, storage)).await;
+                let outcome = retry(
+                    &format!("Transfer source={id} video={}", episode.video.id),
+                    || self.transfer(source_ref, &episode, storage),
+                )
+                .await;
+                if let Err(error) = &outcome {
+                    log::error!(
+                        "Transfer failed source={id} video={}: {error:#}",
+                        episode.video.id
+                    );
+                }
                 changed();
                 outcome
             })
@@ -130,17 +162,26 @@ impl Core {
             outcome?;
         }
         self.db.phase(id, "publishing", None)?;
+        log::info!("Publishing RSS source={id}");
         changed();
         let key = format!("{}/rss.xml", source.folder);
         let feed_url = storage.url(&key)?;
         let feed = crate::rss::render(&self.db.source(id)?, &self.db.episodes(id)?, &feed_url);
         // Use the generic XML MIME type so browsers display the feed in their XML viewer.
-        retry(|| storage.put_text(&key, feed.clone(), "application/xml; charset=utf-8")).await?;
+        retry(&format!("Publish RSS source={id}"), || {
+            storage.put_text(&key, feed.clone(), "application/xml; charset=utf-8")
+        })
+        .await?;
         self.db.published(id, &feed_url)?;
+        log::info!("RSS published source={id}");
         // Publication happens before deletion, so a failed upload never breaks the previous feed.
         self.db.phase(id, "cleaning", None)?;
         changed();
         for episode in self.db.episodes(id)?.into_iter().filter(|e| !e.present) {
+            log::info!(
+                "Removing obsolete audio source={id} video={}",
+                episode.video.id
+            );
             storage
                 .delete(&format!("{}/{}.m4a", source.folder, episode.video.id))
                 .await?;
@@ -151,18 +192,31 @@ impl Core {
         Ok(())
     }
     async fn transfer(&self, source: &Source, episode: &Episode, storage: &Storage) -> Result<()> {
-        let request = self.youtube.media(&episode.video.id).await?;
+        let started = Instant::now();
+        let id = &episode.video.id;
+        log::info!("Resolving audio source={} video={id}", source.id);
+        let request = self.youtube.media(id).await.context("Resolve audio")?;
         let temp = tempfile::Builder::new()
             .prefix("mazit-")
             .tempdir_in(self.directory.join("transfers"))?;
         let input = temp.path().join("download");
         let output = temp.path().join("audio.m4a");
-        crate::network::download(&self.client, &request, &input).await?;
+        log::info!("Downloading audio video={id} bytes={}", request.bytes);
+        crate::network::download(&self.client, &request, &input)
+            .await
+            .context("Download audio")?;
+        log::info!("Preparing M4A video={id}");
         let audio = output.clone();
         let bytes = tokio::task::spawn_blocking(move || crate::audio::prepare_m4a(&input, &audio))
-            .await??;
+            .await
+            .context("Audio worker stopped")?
+            .context("Prepare M4A")?;
         let key = format!("{}/{}.m4a", source.folder, episode.video.id);
-        storage.put_file(&key, &output).await?;
+        log::info!("Uploading audio video={id} bytes={bytes}");
+        storage
+            .put_file(&key, &output)
+            .await
+            .context("Upload audio")?;
         let mut video = episode.video.clone();
         video.title = request.title;
         video.description = request.description;
@@ -170,10 +224,15 @@ impl Core {
         video.published = request.published;
         self.db
             .uploaded(&source.id, &video, bytes, &storage.url(&key)?)?;
+        log::info!(
+            "Transfer completed source={} video={id} bytes={bytes} elapsed={:.1}s",
+            source.id,
+            started.elapsed().as_secs_f64()
+        );
         Ok(())
     }
 }
-pub async fn retry<T, F, Fut>(mut operation: F) -> Result<T>
+pub async fn retry<T, F, Fut>(label: &str, mut operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
@@ -181,8 +240,15 @@ where
     for attempt in 0..3 {
         match operation().await {
             Ok(value) => return Ok(value),
-            Err(error) if attempt == 2 => return Err(error),
-            Err(_) => tokio::time::sleep(Duration::from_secs(1 << attempt)).await,
+            Err(error) if attempt == 2 => return Err(error).with_context(|| label.to_string()),
+            Err(error) => {
+                let delay = 1 << attempt;
+                log::warn!(
+                    "{label} attempt={}/3 failed; retry in {delay}s: {error:#}",
+                    attempt + 1
+                );
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
         }
     }
     unreachable!()
@@ -200,6 +266,7 @@ impl Engine {
         let initial_text = match config::read_text(&config_path) {
             Ok(text) => text,
             Err(error) => {
+                log::error!("Read configuration: {error:#}");
                 state.write().message = crate::redact(&error.to_string());
                 None
             }
@@ -213,8 +280,14 @@ impl Engine {
                 Ok(candidate)
             })();
             match loaded {
-                Ok(candidate) => storage = Some(candidate),
-                Err(error) => state.write().message = crate::redact(&error.to_string()),
+                Ok(candidate) => {
+                    log::info!("Storage configuration loaded");
+                    storage = Some(candidate);
+                }
+                Err(error) => {
+                    log::error!("Load configuration: {error:#}");
+                    state.write().message = crate::redact(&error.to_string());
+                }
             }
         }
         state.write().configured = storage.is_some();
@@ -259,6 +332,7 @@ impl Engine {
                             let candidate = Storage::new(settings.clone())?;
                             core.db.bind_storage(&settings.identity())?;
                             candidate.verify().await?;
+                            log::info!("Storage configuration reloaded and verified");
                             storage = Some(candidate);
                             state.write().configured = true;
                             state.write().message = "Storage config loaded and verified".into();
@@ -290,16 +364,30 @@ impl Engine {
                 }
                 .await;
                 if let Err(error) = operation {
+                    log::error!("Engine operation failed: {error:#}");
                     state.write().message = crate::redact(&error.to_string());
                 }
                 changed();
                 state.write().busy = false;
             }
+            log::info!("Sync worker stopped");
         });
         Ok(engine)
     }
     pub fn command(&self, command: Command) {
-        let _ = self.sender.send(command);
+        let name = match &command {
+            Command::Add(_) => "add subscription",
+            Command::Refresh(_) => "refresh",
+            Command::ReloadConfig => "reload configuration",
+        };
+        log::info!("Command requested: {name}");
+        if self.sender.send(command).is_err() {
+            log::error!("Sync worker is unavailable; command={name}");
+            let mut state = self.state.write();
+            state.busy = false;
+            state.message =
+                "Sync worker stopped. Open logs for details, then restart Mazit.".into();
+        }
     }
 }
 pub fn data_directory() -> Result<PathBuf> {

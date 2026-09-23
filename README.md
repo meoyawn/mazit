@@ -57,6 +57,12 @@ The file contains secrets. Mazit creates its config directory with mode `0700` a
 
 Keep storage configuration files and library data outside the repository. The library lives in `~/Library/Application Support/Mazit`. Only publish files you intend to make public through your storage provider.
 
+## Application logs
+
+Select **Open logs** in the sidebar to open the current log in your `EDITOR` (TextEdit by default), including while a sync is running. Logs are written immediately to `~/Library/Application Support/Mazit/logs/mazit_rCURRENT.log`, with timestamps for startup, sync stages, transfers, retries, failures, publication, and completion. The log rotates at 5 MiB and retains four older files in the same directory. Restarting Mazit appends to the current log.
+
+The log directory is private to your user. Logged URLs are redacted, and raw SDK request diagnostics, storage credentials, and cookie headers are not logged.
+
 ## License
 
 [MIT](LICENSE). Third-party dependencies retain their own licenses, including FFmpeg under LGPL-2.1-or-later.
