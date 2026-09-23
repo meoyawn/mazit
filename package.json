@@ -1,0 +1,7 @@
+{
+  "name": "mazit-youtube-bridge", "private": true, "packageManager": "nub@0.9.2",
+  "license": "MIT",
+  "scripts": {"bundle": "esbuild js/youtube.ts --bundle --keep-names --format=iife --global-name=YouTubeBridge --platform=browser --target=es2022 --outfile=generated/youtube.js"},
+  "dependencies": {"youtubei.js": "18.0.0"},
+  "devDependencies": {"esbuild": "0.28.2"}
+}

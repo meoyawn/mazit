@@ -1,0 +1,56 @@
+[package]
+name = "mazit"
+version = "0.1.0"
+edition = "2024"
+default-run = "mazit"
+description = "A desktop app for listening to YouTube as a podcast"
+license = "MIT"
+repository = "https://github.com/meoyawn/mazit"
+
+[workspace]
+members = ["xtask"]
+resolver = "3"
+
+[features]
+default = ["desktop"]
+desktop = ["dep:gpui", "dep:gpui-component", "dep:tray-icon", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+
+[dependencies]
+anyhow = "1"
+aws-sdk-s3 = { version = "=1.149.0", default-features = false, features = ["default-https-client", "rt-tokio", "rustls"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+directories = "6"
+ffmpeg = { package = "ffmpeg-the-third", version = "=6.0.0", default-features = false, features = ["static", "format", "software-resampling"] }
+futures = "0.3"
+gpui = { version = "=0.2.2", optional = true }
+gpui-component = { version = "=0.5.1", optional = true }
+keyring = { version = "3", features = ["apple-native"] }
+llrt_modules = { version = "=0.8.1-beta", default-features = false, features = ["abort", "buffer", "crypto", "crypto-rust", "events", "exceptions", "fetch", "stream-web", "timers", "url", "util", "path", "intl", "tls-ring"] }
+llrt_utils = { package = "llrt_utils_watts", version = "=0.8.1-beta" }
+parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "cookies", "gzip", "brotli"] }
+rquickjs = { version = "=0.11.0", features = ["full-async"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tray-icon = { version = "=0.25.1", default-features = false, optional = true }
+url = { version = "2", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow"] }
+objc2-foundation = { version = "0.3", optional = true, features = ["NSThread", "NSProcessInfo"] }
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"

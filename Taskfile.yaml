@@ -1,0 +1,47 @@
+version: '3'
+
+env:
+  FFMPEG_DIR: '{{.ROOT_DIR}}/.runtime/ffmpeg'
+  MACOSX_DEPLOYMENT_TARGET: '14.0'
+  DEVELOPER_DIR: '{{.DEVELOPER_DIR | default "/Applications/Xcode.app/Contents/Developer"}}'
+
+tasks:
+  dev:
+    desc: Watch sources, rebuild, and restart the GPUI app
+    deps: [dev:tools]
+    # Rust UI changes restart the process; in-memory UI state is reset.
+    cmd: >-
+      watchexec --restart --debounce 300ms --stop-timeout 5s
+      --watch src --watch js --watch xtask --watch assets
+      --watch Cargo.toml --watch Cargo.lock
+      --watch package.json --watch nub.lock --watch nub.jsonc
+      --shell none -- sh -c
+      'cargo run --package xtask -- prepare &&
+      cargo run --package mazit --bin mazit -- "$@"'
+      mazit-dev {{.CLI_ARGS}}
+
+  build:
+    desc: Build the macOS Apple Silicon release binary
+    deps: [prepare]
+    preconditions:
+      - sh: test '{{OS}}/{{ARCH}}' = darwin/arm64
+        msg: Build on an Apple Silicon Mac so bundled FFmpeg matches the release target.
+    cmd: cargo build --release --target aarch64-apple-darwin --package mazit --bin mazit
+
+  lint:
+    desc: Format the Rust workspace, then lint it with Clippy
+    cmds:
+      - cargo fmt --all
+      - cargo clippy --workspace -- -D warnings
+
+  prepare:
+    internal: true
+    run: once
+    cmd: cargo run --package xtask -- prepare
+
+  dev:tools:
+    internal: true
+    run: once
+    status:
+      - command -v watchexec
+    cmd: cargo install --locked watchexec-cli --version 2.7.3

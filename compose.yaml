@@ -1,0 +1,15 @@
+services:
+  storage:
+    build:
+      context: https://github.com/johannesboyne/gofakes3.git#2dd1a84479724dc2f89d758452bee5bcea99e7f8
+      dockerfile_inline: |
+        FROM golang:1.26.1 AS build
+        WORKDIR /src
+        COPY . .
+        RUN CGO_ENABLED=0 go build -trimpath -o /gofakes3 ./cmd/gofakes3
+        FROM scratch
+        COPY --from=build /gofakes3 /gofakes3
+        ENTRYPOINT ["/gofakes3"]
+    command: ["-backend", "mem", "-initialbucket", "mazit-dev"]
+    ports:
+      - "127.0.0.1:19000:9000"
