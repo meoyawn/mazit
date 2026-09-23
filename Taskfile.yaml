@@ -61,7 +61,6 @@ tasks:
   js:bundle:
     internal: true
     run: once
-    deps: [js:install]
     cmd: >-
       bun build js/youtube.ts --keep-names --target browser
       --format esm --outfile generated/youtube.js
