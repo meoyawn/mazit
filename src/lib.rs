@@ -3,6 +3,7 @@ pub mod config;
 pub mod database;
 #[cfg(feature = "desktop")]
 pub mod desktop;
+pub mod downloads;
 #[cfg(feature = "desktop")]
 pub mod editor;
 pub mod engine;

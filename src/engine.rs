@@ -1,6 +1,7 @@
 use crate::{
     config,
     database::{Database, Episode, Source},
+    downloads::{CONCURRENT_TRANSFERS, DownloadManager, Phase, Transfer},
     network::Cover,
     storage::Storage,
     youtube::YouTube,
@@ -33,6 +34,7 @@ pub enum Command {
 #[derive(Clone)]
 pub struct Engine {
     pub state: Arc<RwLock<ViewState>>,
+    pub downloads: DownloadManager,
     sender: mpsc::UnboundedSender<Command>,
 }
 
@@ -42,6 +44,7 @@ pub struct Core {
     pub client: reqwest::Client,
     pub directory: PathBuf,
     covers: RwLock<HashMap<String, Arc<Cover>>>,
+    downloads: DownloadManager,
     _lock: std::fs::File,
 }
 impl Core {
@@ -61,14 +64,7 @@ impl Core {
         lock.try_lock()
             .context("Another Mazit process is using this library")?;
         let transfers = directory.join("transfers");
-        std::fs::create_dir_all(&transfers)?;
-        // Owned temporary directories are removed on drop; leftovers are safe to clean on next launch.
-        for entry in std::fs::read_dir(&transfers)? {
-            let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with("mazit-") {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
-        }
+        cleanup_transfers(&transfers)?;
         config::export_legacy_storage_binding(&directory)?;
         let db = Database::open(&directory.join("mazit.sqlite"))?;
         let covers = RwLock::new(load_covers(&directory, &db.sources()?));
@@ -84,6 +80,7 @@ impl Core {
             client,
             directory,
             covers,
+            downloads: DownloadManager::default(),
             _lock: lock,
         })
     }
@@ -140,6 +137,7 @@ impl Core {
             snapshot.videos.len()
         );
         self.db.snapshot(id, &snapshot)?;
+        let source = self.db.source(id)?;
         self.db.phase(id, "downloading", None)?;
         changed();
         let cover = if let Some(url) = &snapshot.cover_url {
@@ -162,14 +160,35 @@ impl Core {
         changed();
         let pending = self.db.pending_episodes(id)?;
         log::info!("Transferring source={id} pending={}", pending.len());
+        let transfers = self.downloads.enqueue(
+            id,
+            &source.title,
+            &pending
+                .iter()
+                .map(|episode| (episode.video.id.clone(), episode.video.title.clone()))
+                .collect::<Vec<_>>(),
+        );
         let source_ref = &source;
-        let outcomes = stream::iter(pending)
-            .map(|episode| async move {
-                let outcome = retry(
-                    &format!("Transfer source={id} video={}", episode.video.id),
-                    || self.transfer(source_ref, &episode, storage),
-                )
-                .await;
+        let outcomes = stream::iter(pending.into_iter().zip(transfers))
+            .map(|(episode, transfer)| async move {
+                let active = transfer.acquire().await;
+                let mut outcome = Ok(());
+                for attempt in 1..=3 {
+                    transfer.attempt(attempt);
+                    outcome = self
+                        .transfer(source_ref, &episode, storage, &transfer)
+                        .await;
+                    if let Err(error) = &outcome {
+                        transfer.error(error);
+                        if attempt < 3 {
+                            transfer.phase(Phase::Retrying);
+                            tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                active.finish(&outcome);
                 if let Err(error) = &outcome {
                     log::error!(
                         "Transfer failed source={id} video={}: {error:#}",
@@ -179,7 +198,7 @@ impl Core {
                 changed();
                 outcome
             })
-            .buffer_unordered(5)
+            .buffer_unordered(CONCURRENT_TRANSFERS)
             .collect::<Vec<_>>()
             .await;
         for outcome in outcomes {
@@ -214,57 +233,105 @@ impl Core {
         changed();
         Ok(())
     }
-    async fn transfer(&self, source: &Source, episode: &Episode, storage: &Storage) -> Result<()> {
+    async fn transfer(
+        &self,
+        source: &Source,
+        episode: &Episode,
+        storage: &Storage,
+        transfer: &Transfer,
+    ) -> Result<()> {
         let started = Instant::now();
         let id = &episode.video.id;
         log::info!("Resolving audio source={} video={id}", source.id);
         let request = self.youtube.media(id).await.context("Resolve audio")?;
-        let temp = tempfile::Builder::new()
-            .prefix("mazit-")
-            .tempdir_in(self.directory.join("transfers"))?;
-        let input = temp.path().join("download");
-        let output = temp.path().join("audio.m4a");
-        log::info!(
-            "Downloading audio video={id} itag={} mime={} bitrate={} bytes={}",
-            request.itag,
-            request.mime_type,
-            request.bitrate,
-            request.bytes
-        );
-        let download_started = Instant::now();
-        crate::network::download(&self.client, &request, &input)
-            .await
-            .context("Download audio")?;
-        log::info!(
-            "Downloaded audio video={id} elapsed={:.1}s speed={:.2} MiB/s",
-            download_started.elapsed().as_secs_f64(),
-            request.bytes as f64 / 1048576.0 / download_started.elapsed().as_secs_f64()
-        );
-        log::info!("Preparing M4A video={id}");
-        let audio = output.clone();
-        let bytes = tokio::task::spawn_blocking(move || crate::audio::prepare_m4a(&input, &audio))
+        with_transfer_directory(&self.directory.join("transfers"), |temp| async move {
+            let input = temp.path().join("download");
+            let output = temp.path().join("audio.m4a");
+            log::info!(
+                "Downloading audio video={id} itag={} mime={} bitrate={} bytes={}",
+                request.itag,
+                request.mime_type,
+                request.bitrate,
+                request.bytes
+            );
+            let download_started = Instant::now();
+            crate::network::download(&self.client, &request, &input, Some(transfer))
+                .await
+                .context("Download audio")?;
+            log::info!(
+                "Downloaded audio video={id} elapsed={:.1}s speed={:.2} MiB/s",
+                download_started.elapsed().as_secs_f64(),
+                request.bytes as f64 / 1048576.0 / download_started.elapsed().as_secs_f64()
+            );
+            log::info!("Preparing M4A video={id}");
+            transfer.phase(Phase::Preparing);
+            let audio = output.clone();
+            // Keep ownership in the blocking worker too: cancellation cannot orphan its output.
+            let worker_directory = temp.clone();
+            let bytes = tokio::task::spawn_blocking(move || {
+                let _directory = worker_directory;
+                crate::audio::prepare_m4a(&input, &audio)
+            })
             .await
             .context("Audio worker stopped")?
             .context("Prepare M4A")?;
-        let key = format!("{}/{}.m4a", source.folder, episode.video.id);
-        log::info!("Uploading audio video={id} bytes={bytes}");
-        storage
-            .put_file(&key, &output)
-            .await
-            .context("Upload audio")?;
-        let mut video = episode.video.clone();
-        video.title = request.title;
-        video.description = request.description;
-        video.duration = request.duration;
-        video.published = request.published;
-        self.db
-            .uploaded(&source.id, &video, bytes, &storage.url(&key)?)?;
-        log::info!(
-            "Transfer completed source={} video={id} bytes={bytes} elapsed={:.1}s",
-            source.id,
-            started.elapsed().as_secs_f64()
-        );
-        Ok(())
+            let key = format!("{}/{}.m4a", source.folder, episode.video.id);
+            log::info!("Uploading audio video={id} bytes={bytes}");
+            transfer.phase(Phase::Uploading);
+            storage
+                .put_file(&key, &output)
+                .await
+                .context("Upload audio")?;
+            let mut video = episode.video.clone();
+            video.title = request.title;
+            video.description = request.description;
+            video.duration = request.duration;
+            video.published = request.published;
+            self.db
+                .uploaded(&source.id, &video, bytes, &storage.url(&key)?)?;
+            log::info!(
+                "Transfer completed source={} video={id} bytes={bytes} elapsed={:.1}s",
+                source.id,
+                started.elapsed().as_secs_f64()
+            );
+            Ok(())
+        })
+        .await
+    }
+}
+
+fn cleanup_transfers(directory: &Path) -> Result<()> {
+    std::fs::create_dir_all(directory)?;
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("mazit-") {
+            std::fs::remove_dir_all(entry.path()).context("Remove interrupted audio transfer")?;
+        }
+    }
+    Ok(())
+}
+
+async fn with_transfer_directory<T, F, Fut>(directory: &Path, operation: F) -> Result<T>
+where
+    F: FnOnce(Arc<tempfile::TempDir>) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let temp = Arc::new(
+        tempfile::Builder::new()
+            .prefix("mazit-")
+            .tempdir_in(directory)?,
+    );
+    let result = operation(temp.clone()).await;
+    let cleanup = Arc::try_unwrap(temp)
+        .map_err(|_| anyhow::anyhow!("Audio worker still owns temporary files"))?
+        .close()
+        .context("Remove local audio files");
+    match (result, cleanup) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(cleanup)) => {
+            Err(error.context(format!("Local audio cleanup also failed: {cleanup:#}")))
+        }
     }
 }
 
@@ -363,6 +430,7 @@ impl Engine {
         (
             Self {
                 state: Arc::new(RwLock::new(state)),
+                downloads: DownloadManager::default(),
                 sender,
             },
             receiver,
@@ -374,6 +442,7 @@ impl Engine {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let engine = Self {
             state: state.clone(),
+            downloads: core.downloads.clone(),
             sender,
         };
         let config_path = config::path()?;
@@ -471,11 +540,19 @@ impl Engine {
                         }
                     }
                     if let Some(storage) = &storage {
-                        for id in ids {
-                            if let Err(error) = core.sync(&id, storage, &changed).await {
-                                state.write().message = crate::redact(&error.to_string());
-                            }
-                        }
+                        // Multiple podcasts can progress, sharing the same transfer budget.
+                        stream::iter(ids)
+                            .for_each_concurrent(4, |id| {
+                                let core = &core;
+                                let changed = &changed;
+                                let state = &state;
+                                async move {
+                                    if let Err(error) = core.sync(&id, storage, changed).await {
+                                        state.write().message = crate::redact(&error.to_string());
+                                    }
+                                }
+                            })
+                            .await;
                     }
                     Ok(())
                 }
@@ -660,6 +737,107 @@ mod tests {
         )
         .unwrap();
         db.source(&id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn local_audio_is_removed_after_s3_upload_and_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let mock = MockStorage::new(false);
+        let storage = &mock.storage;
+        with_transfer_directory(directory.path(), |temp| async move {
+            let input = temp.path().join("download");
+            let output = temp.path().join("audio.m4a");
+            std::fs::write(&input, b"original audio")?;
+            std::fs::write(&output, b"prepared audio")?;
+            storage.put_file("episode.m4a", &output).await?;
+            assert!(input.exists() && output.exists());
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(mock.uploads.lock()[0].body, b"prepared audio");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+
+        // Download, conversion and upload errors all leave the same owned scope.
+        for stage in ["download", "conversion", "upload"] {
+            let result: Result<()> = with_transfer_directory(directory.path(), |temp| async move {
+                std::fs::write(temp.path().join("download"), b"partial audio")?;
+                std::fs::write(temp.path().join("audio.m4a"), b"partial output")?;
+                anyhow::bail!("{stage} failed")
+            })
+            .await;
+            assert!(result.is_err());
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        }
+
+        let rejecting = MockStorage::new(true);
+        let storage = &rejecting.storage;
+        let result = with_transfer_directory(directory.path(), |temp| async move {
+            let output = temp.path().join("audio.m4a");
+            std::fs::write(&output, b"prepared audio")?;
+            storage.put_file("cover.m4a", &output).await
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(!rejecting.uploads.lock().is_empty());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_transfer_cleans_local_files_and_restart_cleans_crash_leftovers() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut transfer = Box::pin(with_transfer_directory(
+            directory.path(),
+            |temp| async move {
+                std::fs::write(temp.path().join("download"), b"partial audio")?;
+                std::future::pending::<()>().await;
+                Ok(())
+            },
+        ));
+        assert!(futures::poll!(&mut transfer).is_pending());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        drop(transfer);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+
+        let interrupted = directory.path().join("mazit-interrupted");
+        std::fs::create_dir(&interrupted).unwrap();
+        std::fs::write(interrupted.join("audio.m4a"), b"leftover").unwrap();
+        let other = directory.path().join("unrelated");
+        std::fs::write(&other, b"keep").unwrap();
+        cleanup_transfers(directory.path()).unwrap();
+        assert!(!interrupted.exists());
+        assert!(other.exists());
+    }
+
+    #[tokio::test]
+    async fn cancelled_conversion_retains_directory_until_worker_finishes_then_removes_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_path_buf();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let transfer = tokio::spawn(async move {
+            with_transfer_directory(&path, |temp| async move {
+                tokio::task::spawn_blocking(move || {
+                    std::fs::write(temp.path().join("download"), b"audio").unwrap();
+                    started.send(()).unwrap();
+                    wait.recv().unwrap();
+                    std::fs::write(temp.path().join("audio.m4a"), b"output").unwrap();
+                    drop(temp);
+                    finished.send(()).unwrap();
+                })
+                .await?;
+                Ok(())
+            })
+            .await
+        });
+        ready.await.unwrap();
+        transfer.abort();
+        assert!(transfer.await.unwrap_err().is_cancelled());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        release.send(()).unwrap();
+        done.await.unwrap();
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

@@ -1,6 +1,7 @@
 use super::{MazitView, cover_artwork};
 use crate::{
     database::Database,
+    downloads::{Phase, RangePhase},
     engine::{Command, Engine, ViewState},
     network::Cover,
 };
@@ -169,6 +170,141 @@ fn cover_replacement_and_removal_reach_the_rendered_view(cx: &mut TestAppContext
         cx.debug_bounds("playlist:test:cover").unwrap().size,
         size(px(112.), px(112.))
     );
+}
+
+#[gpui::test]
+fn episode_count_opens_the_global_queue_even_during_sync(cx: &mut TestAppContext) {
+    let mut state = library();
+    state.busy = true;
+    let (view, engine, mut commands, cx) = setup(cx, state);
+    let transfers = engine.downloads.enqueue(
+        "playlist:test",
+        "Covers",
+        &[("first".into(), "First episode".into())],
+    );
+    transfers[0].attempt(1);
+    transfers[0].start_download(16, 4);
+    transfers[0].range(0, 4, RangePhase::Complete);
+    transfers[0].range(4, 2, RangePhase::Active);
+    engine.downloads.enqueue(
+        "other",
+        "Another podcast",
+        &(0..504)
+            .map(|index| (index.to_string(), format!("Queued episode {index}")))
+            .collect::<Vec<_>>(),
+    );
+    click(cx, "playlist:test:downloads");
+    draw(cx);
+    assert!(cx.debug_bounds("download-manager").is_some());
+    assert!(
+        cx.debug_bounds("download:playlist:test/first:Downloading")
+            .is_some()
+    );
+    let first_row_top = cx
+        .debug_bounds("download:playlist:test/first")
+        .unwrap()
+        .top();
+    assert!(cx.debug_bounds("download:other/0").is_some());
+    // Hundreds of waiting items use lazy layout instead of constructing every row.
+    assert!(cx.debug_bounds("download:other/503").is_none());
+    click(cx, "pause-downloads");
+    assert!(engine.downloads.snapshot().paused);
+    click(cx, "pause-downloads");
+    assert!(!engine.downloads.snapshot().paused);
+    click(cx, "downloads-queued");
+    assert!(cx.read_entity(&view, |view, _| view.download_filter
+        == super::downloads::DownloadFilter::Queued));
+    draw(cx);
+    // GPUI 0.2.2 retains old selectors; verify the queued item moves to the first row.
+    assert_eq!(
+        cx.debug_bounds("download:other/0").unwrap().top(),
+        first_row_top
+    );
+    view.update(cx, |view, _| {
+        view.download_scroll
+            .scroll_to_item(503, gpui::ScrollStrategy::Top)
+    });
+    draw(cx);
+    assert!(cx.debug_bounds("download:other/503").is_some());
+    click(cx, "open-library");
+    draw(cx);
+    assert!(cx.debug_bounds("playlist:test:downloads").is_some());
+    assert!(commands.try_recv().is_err());
+}
+
+#[gpui::test]
+fn download_ranges_and_stages_refresh_without_input_and_fit_the_view(cx: &mut TestAppContext) {
+    let (_, engine, _, cx) = setup(cx, library());
+    let transfers = engine.downloads.enqueue(
+        "playlist:test",
+        &"A long podcast name ".repeat(20),
+        &[("first".into(), "An episode title ".repeat(30))],
+    );
+    let transfer = &transfers[0];
+    transfer.attempt(1);
+    transfer.start_download(16, 4);
+    transfer.range(0, 4, RangePhase::Complete);
+    transfer.range(4, 2, RangePhase::Active);
+    click(cx, "open-downloads");
+    for width in [900., 1080., 1440.] {
+        cx.simulate_resize(size(px(width), px(650.)));
+        draw(cx);
+        let row = cx.debug_bounds("download:playlist:test/first").unwrap();
+        let map = cx
+            .debug_bounds("download:playlist:test/first:ranges")
+            .unwrap();
+        let segment = cx
+            .debug_bounds("download:playlist:test/first:range:1")
+            .unwrap();
+        let received = cx
+            .debug_bounds("download:playlist:test/first:received:1")
+            .unwrap();
+        assert!(row.right() < px(width));
+        assert!(map.left() > row.left() && map.right() < row.right());
+        assert!(map.bottom() < row.bottom());
+        assert!(received.size.width > px(0.));
+        assert!(
+            (f32::from(received.size.width) / f32::from(segment.size.width) - 0.5).abs() < 0.03
+        );
+    }
+    transfer.phase(Phase::Uploading);
+    cx.background_executor
+        .advance_clock(Duration::from_millis(500));
+    draw(cx);
+    assert!(
+        cx.debug_bounds("download:playlist:test/first:Uploading")
+            .is_some()
+    );
+    transfer.phase(Phase::Complete);
+    cx.background_executor
+        .advance_clock(Duration::from_millis(500));
+    click(cx, "downloads-complete");
+    draw(cx);
+    assert!(
+        cx.debug_bounds("download:playlist:test/first:Complete")
+            .is_some()
+    );
+    transfer.error(&anyhow::anyhow!("Upload failed"));
+    transfer.phase(Phase::Failed);
+    cx.background_executor
+        .advance_clock(Duration::from_millis(500));
+    click(cx, "downloads-failed");
+    draw(cx);
+    assert!(
+        cx.debug_bounds("download:playlist:test/first:Failed")
+            .is_some()
+    );
+}
+
+#[gpui::test]
+fn empty_download_manager_can_be_opened_and_closed(cx: &mut TestAppContext) {
+    let (_, _, _, cx) = setup(cx, library());
+    click(cx, "open-downloads");
+    draw(cx);
+    assert!(cx.debug_bounds("downloads-empty").is_some());
+    click(cx, "open-library");
+    draw(cx);
+    assert!(cx.debug_bounds("playlist:test:card").is_some());
 }
 
 #[gpui::test]

@@ -4,7 +4,10 @@ use reqwest::{Client, header};
 use std::{io::SeekFrom, path::Path, time::Duration};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-use crate::youtube::MediaRequest;
+use crate::{
+    downloads::{RANGE_BYTES, RANGES_PER_TRANSFER, RangePhase, Transfer},
+    youtube::MediaRequest,
+};
 
 #[derive(Clone, Copy)]
 struct DownloadOptions {
@@ -16,13 +19,18 @@ struct DownloadOptions {
 
 const DOWNLOAD_OPTIONS: DownloadOptions = DownloadOptions {
     // Small parallel ranges allow cheap retries and avoid one connection limiting throughput.
-    chunk_bytes: 1024 * 1024,
-    concurrency: 4,
+    chunk_bytes: RANGE_BYTES,
+    concurrency: RANGES_PER_TRANSFER,
     chunk_timeout: Duration::from_secs(30),
     total_timeout: Duration::from_secs(5 * 60),
 };
 
-pub async fn download(client: &Client, request: &MediaRequest, path: &Path) -> Result<u64> {
+pub async fn download(
+    client: &Client,
+    request: &MediaRequest,
+    path: &Path,
+    progress: Option<&Transfer>,
+) -> Result<u64> {
     let url = url::Url::parse(&request.url)?;
     ensure!(
         url.scheme() == "https"
@@ -39,7 +47,7 @@ pub async fn download(client: &Client, request: &MediaRequest, path: &Path) -> R
         request.bytes > 0 && request.bytes <= 8 * 1024 * 1024 * 1024,
         "Audio length is missing or exceeds the 8 GiB limit"
     );
-    download_ranges(client, request, &url, path, DOWNLOAD_OPTIONS).await
+    download_ranges(client, request, &url, path, DOWNLOAD_OPTIONS, progress).await
 }
 
 async fn download_ranges(
@@ -48,17 +56,22 @@ async fn download_ranges(
     url: &url::Url,
     path: &Path,
     options: DownloadOptions,
+    progress: Option<&Transfer>,
 ) -> Result<u64> {
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .await?;
+    if let Some(progress) = progress {
+        progress.start_download(request.bytes, options.chunk_bytes);
+    }
     let result = tokio::time::timeout(options.total_timeout, async {
         let mut chunks = stream::iter((0..request.bytes).step_by(options.chunk_bytes))
             .map(|start| async move {
                 let end = (start + options.chunk_bytes as u64).min(request.bytes) - 1;
-                let bytes = download_chunk(client, request, url, start, end, options).await?;
+                let bytes =
+                    download_chunk(client, request, url, start, end, options, progress).await?;
                 Ok::<_, anyhow::Error>((start, bytes))
             })
             .buffer_unordered(options.concurrency);
@@ -67,6 +80,9 @@ async fn download_ranges(
             let (start, bytes) = chunk?;
             file.seek(SeekFrom::Start(start)).await?;
             file.write_all(&bytes).await?;
+            if let Some(progress) = progress {
+                progress.range(start, bytes.len() as u64, RangePhase::Complete);
+            }
             count += bytes.len() as u64;
         }
         file.sync_all().await?;
@@ -90,6 +106,7 @@ async fn download_chunk(
     start: u64,
     end: u64,
     options: DownloadOptions,
+    progress: Option<&Transfer>,
 ) -> Result<Vec<u8>> {
     let mut url = url.clone();
     // YouTube.js uses the CDN's range query parameter for audio, not a Range header.
@@ -103,13 +120,31 @@ async fn download_chunk(
         .extend_pairs(query)
         .append_pair("range", &format!("{start}-{end}"));
     for attempt in 1..=3 {
-        let result = fetch_chunk(client, request, &url, start, end, options.chunk_timeout).await;
+        if let Some(progress) = progress {
+            progress.range(start, 0, RangePhase::Active);
+        }
+        let result = fetch_chunk(
+            client,
+            request,
+            &url,
+            start,
+            end,
+            options.chunk_timeout,
+            progress,
+        )
+        .await;
         match result {
             Ok(bytes) => return Ok(bytes),
             Err(error) if attempt == 3 => {
+                if let Some(progress) = progress {
+                    progress.range(start, 0, RangePhase::Retrying);
+                }
                 return Err(error).context("Audio range failed after 3 attempts");
             }
             Err(error) => {
+                if let Some(progress) = progress {
+                    progress.range(start, 0, RangePhase::Retrying);
+                }
                 log::warn!("Audio range {start}-{end} attempt={attempt}/3 failed: {error:#}");
                 tokio::time::sleep(Duration::from_millis(250 * attempt)).await;
             }
@@ -125,6 +160,7 @@ async fn fetch_chunk(
     start: u64,
     end: u64,
     timeout: Duration,
+    progress: Option<&Transfer>,
 ) -> Result<Vec<u8>> {
     let response = client
         .get(url.clone())
@@ -170,6 +206,9 @@ async fn fetch_chunk(
             "Audio response exceeds its byte range"
         );
         bytes.extend_from_slice(&chunk);
+        if let Some(progress) = progress {
+            progress.range(start, bytes.len() as u64, RangePhase::Active);
+        }
     }
     ensure!(bytes.len() as u64 == length, "Incomplete audio range");
     Ok(bytes)
@@ -324,6 +363,7 @@ mod tests {
                 &server.url,
                 &path,
                 TEST_OPTIONS,
+                None,
             )
             .await
             .unwrap();
@@ -341,12 +381,15 @@ mod tests {
         let server = server(Behavior::RetryMiddle).await;
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("audio");
+        let manager = crate::downloads::DownloadManager::default();
+        let transfers = manager.enqueue("podcast", "Podcast", &[("audio".into(), "Audio".into())]);
         download_ranges(
             &Client::new(),
             &request(&server.url),
             &server.url,
             &path,
             TEST_OPTIONS,
+            Some(&transfers[0]),
         )
         .await
         .unwrap();
@@ -354,6 +397,47 @@ mod tests {
         let mut ranges = server.requests.lock().unwrap().clone();
         ranges.sort();
         assert_eq!(ranges, [(0, 3), (4, 7), (4, 7), (8, 11), (12, 13)]);
+        let item = &manager.snapshot().items[0];
+        assert_eq!(item.total, 14);
+        assert_eq!(item.received(), 14);
+        assert!(
+            item.ranges
+                .iter()
+                .all(|range| range.phase == RangePhase::Complete)
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_live_bytes_before_a_range_finishes() {
+        let server = server(Behavior::Trickle).await;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("audio");
+        let manager = crate::downloads::DownloadManager::default();
+        let transfers = manager.enqueue("podcast", "Podcast", &[("audio".into(), "Audio".into())]);
+        let client = Client::new();
+        let request = request(&server.url);
+        let download = download_ranges(
+            &client,
+            &request,
+            &server.url,
+            &path,
+            TEST_OPTIONS,
+            Some(&transfers[0]),
+        );
+        tokio::pin!(download);
+        tokio::select! {
+            result = &mut download => panic!("Download finished before live progress was visible: {result:?}"),
+            _ = async {
+                loop {
+                    let snapshot = manager.snapshot();
+                    if snapshot.items[0].ranges.iter().any(|range| range.received > 0 && range.received < range.end - range.start + 1) { break; }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            } => {}
+        }
+        assert!(manager.snapshot().items[0].received() < 14);
+        assert_eq!(download.await.unwrap(), 14);
+        assert_eq!(manager.snapshot().items[0].received(), 14);
     }
 
     #[tokio::test]
@@ -373,7 +457,8 @@ mod tests {
                     &request(&server.url),
                     &server.url,
                     &path,
-                    TEST_OPTIONS
+                    TEST_OPTIONS,
+                    None,
                 )
                 .await
                 .is_err()
@@ -398,6 +483,7 @@ mod tests {
             &server.url,
             &path,
             options,
+            None,
         )
         .await
         .unwrap_err();
@@ -430,6 +516,7 @@ mod tests {
             &server.url,
             &path,
             options,
+            None,
         )
         .await
         .unwrap_err();
@@ -444,7 +531,9 @@ mod tests {
         let mut request =
             request(&url::Url::parse("https://example.googlevideo.com/audio").unwrap());
         request.mime_type = "video/mp4".into();
-        let error = download(&Client::new(), &request, &path).await.unwrap_err();
+        let error = download(&Client::new(), &request, &path, None)
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "Expected an audio-only format");
         assert!(!path.exists());
     }

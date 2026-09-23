@@ -22,7 +22,12 @@ struct MazitView {
     source: Entity<InputState>,
     cover_images: HashMap<String, Arc<Image>>,
     menu_bar: Option<MenuBar>,
+    show_downloads: bool,
+    download_filter: downloads::DownloadFilter,
+    download_scroll: UniformListScrollHandle,
 }
+
+mod downloads;
 
 struct MenuBar {
     _tray: TrayIcon,
@@ -39,6 +44,7 @@ impl MazitView {
             InputState::new(window, cx).placeholder("Paste a YouTube playlist or channel URL")
         });
         let mut last_state = engine.state.read().clone();
+        let mut last_downloads = engine.downloads.snapshot();
         let cover_images = build_cover_images(&last_state);
         cx.spawn_in(window, async move |view, cx| {
             loop {
@@ -64,11 +70,17 @@ impl MazitView {
                             hide_if_minimized();
                         }
                         let state = view.engine.state.read().clone();
-                        if state != last_state {
+                        let downloads = view.engine.downloads.snapshot();
+                        if state != last_state
+                            || downloads != last_downloads
+                            || (view.show_downloads
+                                && downloads.items.iter().any(|item| item.phase.active()))
+                        {
                             if state.covers != last_state.covers {
                                 view.cover_images = build_cover_images(&state);
                             }
                             last_state = state;
+                            last_downloads = downloads;
                             // Sync state lives outside GPUI. Invalidate the whole window so
                             // completion is painted even without a mouse or keyboard event.
                             cx.notify();
@@ -87,6 +99,9 @@ impl MazitView {
             source,
             cover_images,
             menu_bar: None,
+            show_downloads: false,
+            download_filter: downloads::DownloadFilter::All,
+            download_scroll: UniformListScrollHandle::new(),
         }
     }
     fn open_config(&self, cx: &mut Context<Self>) {
@@ -167,6 +182,24 @@ impl Render for MazitView {
                     .child("YOUR AUDIO, EVERYWHERE"),
             )
             .child(
+                Button::new("library")
+                    .debug_selector(|| "open-library".into())
+                    .label("Library")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_downloads = false;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("downloads")
+                    .debug_selector(|| "open-downloads".into())
+                    .label("Downloads")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_downloads = true;
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("settings")
                     .label("Open config.toml")
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -192,6 +225,14 @@ impl Render for MazitView {
                     .text_xs()
                     .child("Checks every hour\nContinues in the menu bar"),
             );
+        if self.show_downloads {
+            return div()
+                .h_flex()
+                .size_full()
+                .bg(rgb(0xf8f9fc))
+                .child(sidebar)
+                .child(self.render_downloads(cx));
+        }
         let mut content = div()
             .v_flex()
             .flex_1()
@@ -372,10 +413,21 @@ impl Render for MazitView {
                                     ),
                             )
                             .child(
-                                div().text_color(rgb(0x7d8597)).child(format!(
-                                    "{} / {} episodes",
-                                    source.uploaded, source.total
-                                )),
+                                Button::new((element_id.clone(), "downloads"))
+                                    .debug_selector(|| format!("{}:downloads", source.id))
+                                    .ghost()
+                                    .small()
+                                    .label(format!(
+                                        "{} / {} episodes",
+                                        source.uploaded, source.total
+                                    ))
+                                    .tooltip("Open download manager for all podcasts")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_downloads = true;
+                                        this.download_filter = downloads::DownloadFilter::All;
+                                        this.download_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                        cx.notify();
+                                    })),
                             ),
                     );
                 if let Some(error) = &source.error {
