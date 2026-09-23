@@ -27,7 +27,8 @@ The build prepares FFmpeg and the embedded YouTube.js bridge automatically.
 - `task build` — build the macOS Apple Silicon release binary at `target/aarch64-apple-darwin/release/mazit`.
 - `task bundle` — build the macOS app at `dist/Mazit.app`.
 - `task lint` — format the Rust workspace, then run Clippy.
-- `task test` — run the Cargo workspace tests.
+- `task test` — run the Cargo workspace and headless GPUI tests.
+- `task test:ui` — run the library's layout and interaction tests without desktop automation. See [UI testing](docs/testing.md).
 - `task check` — run lint and tests together as one check.
 
 The dependency graph is `run → build:debug → prepare` and `build → prepare`. Preparation bundles the YouTube bridge with Bun and runs the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build checksum-verified FFmpeg libraries when missing. JavaScript installation runs before bundling; Rust compilation waits for both the bridge and FFmpeg.

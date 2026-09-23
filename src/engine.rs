@@ -346,6 +346,18 @@ where
 }
 
 impl Engine {
+    #[cfg(all(test, feature = "ui-tests"))]
+    pub(crate) fn for_test(state: ViewState) -> (Self, mpsc::UnboundedReceiver<Command>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (
+            Self {
+                state: Arc::new(RwLock::new(state)),
+                sender,
+            },
+            receiver,
+        )
+    }
+
     pub fn start(core: Core, runtime: &tokio::runtime::Handle) -> Result<Self> {
         let state = Arc::new(RwLock::new(ViewState::default()));
         let (sender, mut receiver) = mpsc::unbounded_channel();

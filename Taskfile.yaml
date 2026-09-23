@@ -54,12 +54,22 @@ tasks:
     cmds:
       - task: js:lint
       - cargo fmt --all
-      - cargo clippy --workspace -- -D warnings
+      - cargo clippy --workspace --all-targets --features ui-tests -- -D warnings
 
   test:
+    desc: Run Cargo workspace and headless GPUI tests
+    run: once
+    deps: [test:unit, test:ui]
+
+  test:unit:
     desc: Run Cargo workspace tests
     run: once
     cmd: cargo test --workspace
+
+  test:ui:
+    desc: Run headless GPUI layout and interaction tests
+    run: once
+    cmd: cargo test --lib --features ui-tests desktop::tests
 
   check:
     desc: Format, lint, and test the workspace

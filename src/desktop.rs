@@ -21,6 +21,10 @@ struct MazitView {
     engine: Engine,
     source: Entity<InputState>,
     cover_images: HashMap<String, Arc<Image>>,
+    menu_bar: Option<MenuBar>,
+}
+
+struct MenuBar {
     _tray: TrayIcon,
     open_id: tray_icon::menu::MenuId,
     refresh_id: tray_icon::menu::MenuId,
@@ -34,32 +38,6 @@ impl MazitView {
         let source = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Paste a YouTube playlist or channel URL")
         });
-        let menu = Menu::new();
-        let open = MenuItem::new("Open Mazit", true, None);
-        let refresh = MenuItem::new("Refresh all", true, None);
-        let quit = MenuItem::new("Quit Mazit", true, None);
-        menu.append_items(&[&open, &refresh, &quit])
-            .expect("Menu bar items");
-        let mut pixels = vec![0u8; 22 * 22 * 4];
-        for x in [4usize, 8, 12, 16] {
-            let height = if x == 8 || x == 12 { 16 } else { 8 };
-            for y in (22 - height) / 2..(22 + height) / 2 {
-                for dx in 0..2 {
-                    pixels[(y * 22 + x + dx) * 4 + 3] = 255;
-                }
-            }
-        }
-        let tray = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip("Mazit")
-            .with_icon(Icon::from_rgba(pixels, 22, 22).unwrap())
-            .with_icon_as_template(true)
-            .build()
-            .expect("Menu bar icon");
-        window.on_window_should_close(cx, |_, _| {
-            hide_window();
-            false
-        });
         let mut last_state = engine.state.read().clone();
         let cover_images = build_cover_images(&last_state);
         cx.spawn_in(window, async move |view, cx| {
@@ -69,20 +47,22 @@ impl MazitView {
                     .await;
                 if view
                     .update_in(cx, |view, window, cx| {
-                        while let Ok(event) = MenuEvent::receiver().try_recv() {
-                            if event.id == view.open_id {
-                                show_window();
-                                cx.activate(true);
-                                window.refresh();
+                        if let Some(menu_bar) = &view.menu_bar {
+                            while let Ok(event) = MenuEvent::receiver().try_recv() {
+                                if event.id == menu_bar.open_id {
+                                    show_window();
+                                    cx.activate(true);
+                                    window.refresh();
+                                }
+                                if event.id == menu_bar.refresh_id {
+                                    view.engine.command(Command::Refresh(None));
+                                }
+                                if event.id == menu_bar.quit_id {
+                                    cx.quit();
+                                }
                             }
-                            if event.id == view.refresh_id {
-                                view.engine.command(Command::Refresh(None));
-                            }
-                            if event.id == view.quit_id {
-                                cx.quit();
-                            }
+                            hide_if_minimized();
                         }
-                        hide_if_minimized();
                         let state = view.engine.state.read().clone();
                         if state != last_state {
                             if state.covers != last_state.covers {
@@ -106,12 +86,7 @@ impl MazitView {
             engine,
             source,
             cover_images,
-            _tray: tray,
-            open_id: open.id().clone(),
-            refresh_id: refresh.id().clone(),
-            quit_id: quit.id().clone(),
-            #[cfg(target_os = "macos")]
-            _activity: Activity::new(),
+            menu_bar: None,
         }
     }
     fn open_config(&self, cx: &mut Context<Self>) {
@@ -132,10 +107,46 @@ impl MazitView {
         cx.notify();
     }
 }
+impl MenuBar {
+    fn new() -> Self {
+        let menu = Menu::new();
+        let open = MenuItem::new("Open Mazit", true, None);
+        let refresh = MenuItem::new("Refresh all", true, None);
+        let quit = MenuItem::new("Quit Mazit", true, None);
+        menu.append_items(&[&open, &refresh, &quit])
+            .expect("Menu bar items");
+        let mut pixels = vec![0u8; 22 * 22 * 4];
+        for x in [4usize, 8, 12, 16] {
+            let height = if x == 8 || x == 12 { 16 } else { 8 };
+            for y in (22 - height) / 2..(22 + height) / 2 {
+                for dx in 0..2 {
+                    pixels[(y * 22 + x + dx) * 4 + 3] = 255;
+                }
+            }
+        }
+        let tray = TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("Mazit")
+            .with_icon(Icon::from_rgba(pixels, 22, 22).unwrap())
+            .with_icon_as_template(true)
+            .build()
+            .expect("Menu bar icon");
+        Self {
+            _tray: tray,
+            open_id: open.id().clone(),
+            refresh_id: refresh.id().clone(),
+            quit_id: quit.id().clone(),
+            #[cfg(target_os = "macos")]
+            _activity: Activity::new(),
+        }
+    }
+}
+
 impl Render for MazitView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.engine.state.read().clone();
         let sidebar = div()
+            .debug_selector(|| "sidebar".into())
             .v_flex()
             .w(px(240.))
             .flex_shrink_0()
@@ -203,6 +214,7 @@ impl Render for MazitView {
                     ))
                     .child(
                         Button::new("refresh")
+                            .debug_selector(|| "refresh-all".into())
                             .label("Refresh all")
                             .disabled(state.busy || !state.configured)
                             .on_click(cx.listener(|this, _, _, _| {
@@ -244,9 +256,14 @@ impl Render for MazitView {
                     .bg(rgb(0xffffff))
                     .rounded_xl()
                     .child("Turn a playlist into a podcast")
-                    .child(Input::new(&self.source))
+                    .child(
+                        div()
+                            .debug_selector(|| "source-input".into())
+                            .child(Input::new(&self.source)),
+                    )
                     .child(
                         Button::new("add")
+                            .debug_selector(|| "add-source".into())
                             .primary()
                             .label("Add subscription")
                             .disabled(state.busy)
@@ -273,20 +290,12 @@ impl Render for MazitView {
             for source in &state.sources {
                 let id = source.id.clone();
                 let element_id = ElementId::from(SharedString::from(id.clone()));
-                let cover = match self.cover_images.get(&source.id) {
-                    Some(image) => img(image.clone())
-                        .size_full()
-                        .object_fit(ObjectFit::Cover)
-                        .with_fallback(cover_placeholder)
-                        .into_any_element(),
-                    None => cover_placeholder(),
-                };
-                let cover = div()
-                    .size(px(112.))
-                    .flex_shrink_0()
-                    .rounded_lg()
-                    .overflow_hidden()
-                    .child(cover);
+                let cover = cover_artwork(
+                    self.cover_images
+                        .get(&source.id)
+                        .map(|image| image.clone().into()),
+                )
+                .debug_selector(|| format!("{}:cover", source.id));
                 let (status, status_color) = match source.phase.as_str() {
                     "idle" if source.feed_url.is_some() => ("Up to date", 0x36826c),
                     "idle" => ("Waiting to sync", 0x7d8597),
@@ -298,6 +307,7 @@ impl Render for MazitView {
                     _ => ("Syncing", 0x526bbe),
                 };
                 let mut details = div()
+                    .debug_selector(|| format!("{}:details", source.id))
                     .v_flex()
                     .flex_1()
                     .min_w_0()
@@ -325,6 +335,7 @@ impl Render for MazitView {
                             )
                             .child(
                                 Button::new((element_id.clone(), "refresh"))
+                                    .debug_selector(|| format!("{}:refresh", source.id))
                                     .icon(UiIcon::default().path("icons/refresh.svg"))
                                     .ghost()
                                     .small()
@@ -341,18 +352,24 @@ impl Render for MazitView {
                             .gap_3()
                             .text_sm()
                             .child(
-                                Link::new((element_id.clone(), "youtube"))
-                                    .href(source.url.clone())
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_color(rgb(0x526bbe))
-                                    .child(if source.kind == "channel" {
-                                        "YouTube channel"
-                                    } else {
-                                        "YouTube playlist"
-                                    })
-                                    .child(UiIcon::new(IconName::ExternalLink).size(px(12.))),
+                                div()
+                                    .debug_selector(|| format!("{}:youtube", source.id))
+                                    .child(
+                                        Link::new((element_id.clone(), "youtube"))
+                                            .href(source.url.clone())
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .text_color(rgb(0x526bbe))
+                                            .child(if source.kind == "channel" {
+                                                "YouTube channel"
+                                            } else {
+                                                "YouTube playlist"
+                                            })
+                                            .child(
+                                                UiIcon::new(IconName::ExternalLink).size(px(12.)),
+                                            ),
+                                    ),
                             )
                             .child(
                                 div().text_color(rgb(0x7d8597)).child(format!(
@@ -392,6 +409,7 @@ impl Render for MazitView {
                             .child(
                                 div()
                                     .id((element_id.clone(), "feed-url"))
+                                    .debug_selector(|| format!("{}:feed", source.id))
                                     .min_w_0()
                                     .flex_1()
                                     .overflow_hidden()
@@ -410,6 +428,7 @@ impl Render for MazitView {
                             .child(
                                 div()
                                     .id((element_id.clone(), "copy-tooltip"))
+                                    .debug_selector(|| format!("{}:copy", source.id))
                                     .flex_shrink_0()
                                     .tooltip(|window, cx| {
                                         Tooltip::new("Copy RSS URL").build(window, cx)
@@ -430,6 +449,7 @@ impl Render for MazitView {
                 }
                 list = list.child(
                     div()
+                        .debug_selector(|| format!("{}:card", source.id))
                         .h_flex()
                         .items_start()
                         .flex_shrink_0()
@@ -499,6 +519,23 @@ fn build_cover_images(state: &crate::engine::ViewState) -> HashMap<String, Arc<I
         .collect()
 }
 
+fn cover_artwork(image: Option<ImageSource>) -> Div {
+    let image = match image {
+        Some(image) => img(image)
+            .size_full()
+            .object_fit(ObjectFit::Cover)
+            .with_fallback(cover_placeholder)
+            .into_any_element(),
+        None => cover_placeholder(),
+    };
+    div()
+        .size(px(112.))
+        .flex_shrink_0()
+        .rounded_lg()
+        .overflow_hidden()
+        .child(image)
+}
+
 fn cover_placeholder() -> AnyElement {
     div()
         .flex()
@@ -534,7 +571,15 @@ pub fn run(engine: Engine) {
                 ..Default::default()
             },
             |window, cx| {
-                let view = cx.new(|cx| MazitView::new(engine, window, cx));
+                let view = cx.new(|cx| {
+                    let mut view = MazitView::new(engine, window, cx);
+                    view.menu_bar = Some(MenuBar::new());
+                    window.on_window_should_close(cx, |_, _| {
+                        hide_window();
+                        false
+                    });
+                    view
+                });
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
@@ -608,3 +653,6 @@ impl Drop for Activity {
         }
     }
 }
+
+#[cfg(all(test, feature = "ui-tests"))]
+mod tests;

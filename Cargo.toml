@@ -15,6 +15,7 @@ required-features = ["desktop"]
 [features]
 default = ["desktop"]
 desktop = ["dep:gpui", "dep:gpui-component", "dep:gpui-component-assets", "dep:tray-icon", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+ui-tests = ["desktop", "gpui/test-support"]
 
 [dependencies]
 anyhow = "1"
