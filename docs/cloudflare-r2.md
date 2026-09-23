@@ -255,7 +255,7 @@ Shared RSS caching could use a short origin-provided TTL such as `public, max-ag
 | Audio never hits cache                         | Custom hostname, matching rules, rule precedence, headers, object size, Development Mode, and identical URLs without cache busters.                                                                             |
 | Range request returns full `200`               | Valid range, nonempty object, no mismatched `If-Range`, and no encoding/body transformations.                                                                                                                   |
 | Feed or removed audio is stale                 | Correct bypass rule and successful publishing; purge previously cached URLs. Players maintain their own refresh schedules and downloaded copies.                                                                |
-| Changing the public URL is rejected            | An existing library is bound to its destination. Plan a migration or quit Mazit and start a separate library with `--data-dir /absolute/path/to/a/new/library`. This does not migrate subscribers or old files. |
+| Changing the public URL is rejected            | An existing library is bound to its destination. To start a new library, quit Mazit, archive `~/Library/Application Support/Mazit`, then relaunch. This does not migrate subscribers or old files. |
 
 ## Launch checklist
 

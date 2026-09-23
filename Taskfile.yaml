@@ -15,12 +15,12 @@ tasks:
       --watch src --watch js --watch scripts --watch assets
       --watch Cargo.toml --watch Cargo.lock --watch Taskfile.yaml
       --watch package.json --watch bun.lock
-      --shell none -- task run -- {{.CLI_ARGS}}
+      --shell none -- task run
 
   run:
     desc: Build and run the GPUI app once
     deps: [build:debug]
-    cmd: ./target/debug/mazit {{.CLI_ARGS}}
+    cmd: ./target/debug/mazit
 
   build:debug:
     desc: Build the debug binary
@@ -48,10 +48,20 @@ tasks:
 
   lint:
     desc: Format and lint the TypeScript sources and Rust workspace
+    run: once
     cmds:
       - task: js:lint
       - cargo fmt --all
       - cargo clippy --workspace -- -D warnings
+
+  test:
+    desc: Run Cargo workspace tests
+    run: once
+    cmd: cargo test --workspace
+
+  check:
+    desc: Format, lint, and test the workspace
+    deps: [lint, test]
 
   prepare:
     desc: Prepare the JavaScript bridge and native libraries
