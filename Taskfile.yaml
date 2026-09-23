@@ -48,7 +48,6 @@ tasks:
 
   lint:
     desc: Format and lint the TypeScript sources and Rust workspace
-    deps: [prepare]
     cmds:
       - task: js:lint
       - cargo fmt --all
@@ -74,15 +73,14 @@ tasks:
 
   js:lint:
     desc: Format TypeScript sources and configuration, then lint with Oxlint
-    deps: [js:install]
     cmds:
-      - bunx --no-install oxfmt --write js scripts package.json tsconfig.json .oxfmtrc.json
-      - bunx --no-install oxlint --deny-warnings js scripts
+      - bun run oxfmt --write js scripts package.json tsconfig.json .oxfmtrc.json
+      - bun run oxlint --deny-warnings js scripts
 
   ffmpeg:build:
     internal: true
     run: once
-    cmd: bun scripts/prepare-ffmpeg.ts
+    cmd: bun run scripts/prepare-ffmpeg.ts
 
   dev:tools:
     internal: true
