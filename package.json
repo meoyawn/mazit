@@ -1,5 +1,15 @@
 {
-  "name": "mazit-youtube-bridge", "private": true, "packageManager": "bun@1.4.2",
+  "name": "mazit-youtube-bridge",
+  "private": true,
   "license": "MIT",
-  "dependencies": {"youtubei.js": "18.0.0"}
+  "dependencies": {
+    "youtubei.js": "18.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.2",
+    "oxfmt": "0.70.0",
+    "oxlint": "1.85.0",
+    "typescript": "7.0.2"
+  },
+  "packageManager": "bun@1.4.2"
 }

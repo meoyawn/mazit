@@ -47,9 +47,10 @@ tasks:
       - cp "$FFMPEG_DIR/COPYING.LGPLv2.1" dist/Mazit.app/Contents/Resources/FFmpeg-LICENSE.txt
 
   lint:
-    desc: Format the Rust workspace, then lint it with Clippy
+    desc: Format and lint the TypeScript sources and Rust workspace
     deps: [prepare]
     cmds:
+      - task: js:lint
       - cargo fmt --all
       - cargo clippy --workspace -- -D warnings
 
@@ -70,6 +71,13 @@ tasks:
     internal: true
     run: once
     cmd: bun install --frozen-lockfile
+
+  js:lint:
+    desc: Format TypeScript sources and configuration, then lint with Oxlint
+    deps: [js:install]
+    cmds:
+      - bunx --no-install oxfmt --write js scripts package.json tsconfig.json .oxfmtrc.json
+      - bunx --no-install oxlint --deny-warnings js scripts
 
   ffmpeg:build:
     internal: true
