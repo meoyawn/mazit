@@ -2661,6 +2661,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "flexi_logger"
+version = "0.31.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4945fa9cdfd7571192cf559c186d45ab36c8034482a2d217a19bdc566f190cc"
+dependencies = [
+ "chrono",
+ "log",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "float-cmp"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5006,11 +5017,13 @@ dependencies = [
  "chrono",
  "directories",
  "ffmpeg-the-third",
+ "flexi_logger",
  "futures",
  "gpui",
  "gpui-component",
  "llrt_modules",
  "llrt_utils_watts",
+ "log",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

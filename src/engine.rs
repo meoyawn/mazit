@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ViewState {
     pub sources: Vec<Source>,
     pub busy: bool,
@@ -134,8 +134,8 @@ impl Core {
         let key = format!("{}/rss.xml", source.folder);
         let feed_url = storage.url(&key)?;
         let feed = crate::rss::render(&self.db.source(id)?, &self.db.episodes(id)?, &feed_url);
-        retry(|| storage.put_text(&key, feed.clone(), "application/rss+xml; charset=utf-8"))
-            .await?;
+        // Use the generic XML MIME type so browsers display the feed in their XML viewer.
+        retry(|| storage.put_text(&key, feed.clone(), "application/xml; charset=utf-8")).await?;
         self.db.published(id, &feed_url)?;
         // Publication happens before deletion, so a failed upload never breaks the previous feed.
         self.db.phase(id, "cleaning", None)?;

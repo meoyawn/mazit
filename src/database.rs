@@ -7,7 +7,7 @@ use std::{path::Path, sync::Arc};
 
 #[derive(Clone)]
 pub struct Database(Arc<Mutex<Connection>>);
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Source {
     pub id: String,
     pub kind: String,

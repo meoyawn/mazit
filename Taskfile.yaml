@@ -10,12 +10,14 @@ tasks:
     desc: Watch sources, rebuild, and restart the GPUI app
     deps: [dev:tools]
     # Rust UI changes restart the process; in-memory UI state is reset.
+    # The runner stops this watcher when the app exits successfully.
     cmd: >-
-      watchexec --restart --debounce 300ms --stop-timeout 5s
+      sh -c 'MAZIT_DEV_WATCHER_PID=$$ exec watchexec
+      --restart --debounce 300ms --stop-timeout 5s
       --watch src --watch js --watch scripts --watch assets
       --watch Cargo.toml --watch Cargo.lock --watch Taskfile.yaml
       --watch package.json --watch bun.lock
-      --shell none -- task run
+      --shell none -- sh scripts/dev-run.sh'
 
   run:
     desc: Build and run the GPUI app once

@@ -136,20 +136,7 @@ fn write_new(path: &Path, contents: &str) -> Result<()> {
 pub fn open_in_editor() -> Result<()> {
     let path = path()?;
     ensure_template(&path)?;
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "open -e".to_string());
-    let parts = shlex::split(&editor).context("EDITOR has invalid quoting")?;
-    let Some(program) = parts.first() else {
-        anyhow::bail!("EDITOR is empty");
-    };
-    let mut child = std::process::Command::new(program)
-        .args(&parts[1..])
-        .arg(path)
-        .spawn()
-        .with_context(|| format!("Launch editor {program}"))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    crate::editor::open(&path)
 }
 
 #[cfg(test)]

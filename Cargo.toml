@@ -23,11 +23,13 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 ffmpeg = { package = "ffmpeg-the-third", version = "=6.0.0", default-features = false, features = ["static", "format", "software-resampling"] }
+flexi_logger = { version = "0.31", default-features = false }
 futures = "0.3"
 gpui = { version = "=0.2.2", optional = true }
 gpui-component = { version = "=0.5.1", optional = true }
 llrt_modules = { version = "=0.8.1-beta", default-features = false, features = ["abort", "buffer", "crypto", "crypto-rust", "events", "exceptions", "fetch", "stream-web", "timers", "url", "util", "path", "intl", "tls-ring"] }
 llrt_utils = { package = "llrt_utils_watts", version = "=0.8.1-beta" }
+log = "0.4"
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "cookies", "gzip", "brotli"] }
 rquickjs = { version = "=0.11.0", features = ["full-async"] }

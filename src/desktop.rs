@@ -56,17 +56,19 @@ impl MazitView {
             hide_window();
             false
         });
-        cx.spawn(async move |view, cx| {
+        let mut last_state = engine.state.read().clone();
+        cx.spawn_in(window, async move |view, cx| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
                     .await;
                 if view
-                    .update(cx, |view, cx| {
+                    .update_in(cx, |view, window, cx| {
                         while let Ok(event) = MenuEvent::receiver().try_recv() {
                             if event.id == view.open_id {
                                 show_window();
                                 cx.activate(true);
+                                window.refresh();
                             }
                             if event.id == view.refresh_id {
                                 view.engine.command(Command::Refresh(None));
@@ -76,7 +78,14 @@ impl MazitView {
                             }
                         }
                         hide_if_minimized();
-                        cx.notify();
+                        let state = view.engine.state.read().clone();
+                        if state != last_state {
+                            last_state = state;
+                            // Sync state lives outside GPUI. Invalidate the whole window so
+                            // completion is painted even without a mouse or keyboard event.
+                            cx.notify();
+                            window.refresh();
+                        }
                     })
                     .is_err()
                 {
@@ -100,6 +109,16 @@ impl MazitView {
         self.engine.state.write().message = match config::open_in_editor() {
             Ok(()) => "Opened config.toml; save it, then select Reload config".into(),
             Err(error) => crate::redact(&format!("{error:#}")),
+        };
+        cx.notify();
+    }
+    fn open_logs(&self, cx: &mut Context<Self>) {
+        self.engine.state.write().message = match crate::logging::open_in_editor() {
+            Ok(()) => "Opened application logs in your editor".into(),
+            Err(error) => {
+                log::error!("Open logs: {error:#}");
+                crate::redact(&format!("{error:#}"))
+            }
         };
         cx.notify();
     }
@@ -140,6 +159,11 @@ impl Render for MazitView {
                     .on_click(cx.listener(|this, _, _, _| {
                         this.engine.command(Command::ReloadConfig);
                     })),
+            )
+            .child(
+                Button::new("open-logs")
+                    .label("Open logs")
+                    .on_click(cx.listener(|this, _, _, cx| this.open_logs(cx))),
             );
         for source in &state.sources {
             sidebar = sidebar.child(

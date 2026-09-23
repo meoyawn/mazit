@@ -19,8 +19,8 @@ open dist/Mazit.app
 
 The build prepares FFmpeg and the embedded YouTube.js bridge automatically.
 
-- `task dev` — watch sources, rebuild, and restart the GPUI app. Installs Watchexec if needed.
-- `task run` — prepare dependencies, build debug Rust, and run `target/debug/mazit`. Watchexec calls this task on each restart.
+- `task dev` — watch sources, rebuild, and restart the GPUI app. Installs Watchexec if needed. Quit Mazit from the menu bar to stop the dev session.
+- `task run` — prepare dependencies, build debug Rust, and run `target/debug/mazit`. `task dev` calls this task on each restart.
 - `task build:debug` — build the debug binary without starting it.
 - `task build` — build the macOS Apple Silicon release binary at `target/aarch64-apple-darwin/release/mazit`.
 - `task bundle` — build the macOS app at `dist/Mazit.app`.
