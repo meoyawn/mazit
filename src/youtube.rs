@@ -385,6 +385,30 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn handle_urls_share_the_canonical_channel_identity() {
+        let id = "UCCsdwE2z_kRL3vfVsd5OGyA";
+        let urls = [
+            "https://www.youtube.com/@RyanFleury/videos",
+            "https://www.youtube.com/@RyanFleury/",
+        ];
+        let youtube = YouTube::with_responses(
+            urls.iter()
+                .map(|url| ("resolve", json!({"url": url}), json!({"id": id})))
+                .collect(),
+        );
+        for url in urls {
+            assert_eq!(
+                youtube.resolve(url).await.unwrap(),
+                (
+                    "channel".into(),
+                    id.into(),
+                    format!("https://www.youtube.com/channel/{id}")
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn playlist_cover_survives_continuation_pages() {
         let youtube = YouTube::with_responses(vec![
             (
@@ -581,17 +605,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bun_bundle_initializes_in_quickjs() {
+    async fn bun_bundle_resolves_channel_html_in_quickjs_without_innertube() {
         let runtime = AsyncRuntime::new().unwrap();
         runtime.set_max_stack_size(4 * 1024 * 1024).await;
         let (resolver, loader, globals) = ModuleBuilder::default().build();
         runtime.set_loader(resolver, loader).await;
         let context = AsyncContext::full(&runtime).await.unwrap();
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::<Fetch>::new()));
+        let captured = requests.clone();
         context
             .with(|ctx| {
                 use llrt_utils::primordials::Primordial;
                 llrt_utils::primordials::BasePrimordials::init(&ctx)?;
                 globals.attach(&ctx)?;
+                ctx.globals().set(
+                    "hostFetch",
+                    Func::from(move |request: String| {
+                        captured.lock().push(serde_json::from_str(&request).unwrap());
+                        json!({
+                            "status": 200,
+                            "headers": {"content-type": "text/html"},
+                            "body": BASE64_STANDARD.encode(
+                                r#"<link rel="canonical" href="https://www.youtube.com/channel/UCCsdwE2z_kRL3vfVsd5OGyA">"#
+                            )
+                        }).to_string()
+                    }),
+                )?;
+                ctx.eval::<(), _>(
+                    "function hostCookie() { throw new Error('Unexpected Innertube session'); }",
+                )?;
                 load_bridge(&ctx)?;
                 let bridge: rquickjs::Object = ctx.globals().get("YouTubeBridge")?;
                 let _: Function = bridge.get("call")?;
@@ -599,5 +641,30 @@ mod tests {
             })
             .await
             .unwrap();
+        let urls = [
+            "https://www.youtube.com/@RyanFleury/videos",
+            "https://www.youtube.com/@RyanFleury/",
+        ];
+        for url in urls {
+            let resolved = async_with!(context => |ctx| {
+                let bridge: rquickjs::Object = ctx.globals().get("YouTubeBridge")?;
+                let function: Function = bridge.get("call")?;
+                let promise: Promise = function.call(("resolve", json!({"url": url}).to_string()))?;
+                promise.into_future::<String>().await
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&resolved).unwrap(),
+                json!({"id": "UCCsdwE2z_kRL3vfVsd5OGyA"})
+            );
+        }
+        let requests = requests.lock();
+        assert_eq!(requests.len(), urls.len());
+        for (request, url) in requests.iter().zip(urls) {
+            assert_eq!(request.url, url);
+            assert_eq!(request.method, "GET");
+            assert!(request.body.is_none());
+        }
     }
 }

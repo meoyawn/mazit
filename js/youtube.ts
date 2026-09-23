@@ -8,6 +8,7 @@ import {
 } from "youtubei.js";
 import { fetchPlaylist, playlistPage } from "./youtube-listing.ts";
 import { selectAudioFormat } from "./youtube-media.ts";
+import { resolveChannel } from "./youtube-channel.ts";
 
 declare function hostFetch(request: string): Promise<string>;
 declare function hostCookie(): string;
@@ -100,11 +101,12 @@ export async function call(method: string, json: string): Promise<string> {
 
 async function operation(method: string, json: string): Promise<string> {
   const args = JSON.parse(json);
-  const yt = await session();
   if (method === "resolve") {
-    const endpoint = await yt.resolveURL(args.url);
-    return JSON.stringify({ id: endpoint.payload.browseId });
+    return JSON.stringify({
+      id: await resolveChannel(args.url, fetchThroughRust),
+    });
   }
+  const yt = await session();
   if (method === "page") {
     const previous = pages.get(args.id);
     const page =
