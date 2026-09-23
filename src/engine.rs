@@ -1,13 +1,16 @@
 use crate::{
     config,
     database::{Database, Episode, Source},
+    network::Cover,
     storage::Storage,
     youtube::YouTube,
 };
 use anyhow::{Context, Result, ensure};
 use futures::{StreamExt, stream};
 use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -17,6 +20,7 @@ use tokio::sync::mpsc;
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ViewState {
     pub sources: Vec<Source>,
+    pub covers: HashMap<String, Arc<Cover>>,
     pub busy: bool,
     pub configured: bool,
     pub message: String,
@@ -37,6 +41,7 @@ pub struct Core {
     pub youtube: YouTube,
     pub client: reqwest::Client,
     pub directory: PathBuf,
+    covers: RwLock<HashMap<String, Arc<Cover>>>,
     _lock: std::fs::File,
 }
 impl Core {
@@ -65,6 +70,7 @@ impl Core {
             }
         }
         let db = Database::open(&directory.join("mazit.sqlite"))?;
+        let covers = RwLock::new(load_covers(&directory, &db.sources()?));
         let (client, jar) = crate::network::client(cookies)?;
         let youtube = YouTube::start(
             client.clone(),
@@ -76,6 +82,7 @@ impl Core {
             youtube,
             client,
             directory,
+            covers,
             _lock: lock,
         })
     }
@@ -131,6 +138,24 @@ impl Core {
         self.db.snapshot(id, &snapshot)?;
         self.db.phase(id, "downloading", None)?;
         changed();
+        let cover = if let Some(url) = &snapshot.cover_url {
+            log::info!("Downloading cover source={id}");
+            Some(Arc::new(
+                retry(&format!("Download cover source={id}"), || {
+                    crate::network::download_cover(&self.client, url)
+                })
+                .await?,
+            ))
+        } else {
+            None
+        };
+        cache_cover(&self.directory, &source, cover.as_deref())?;
+        if let Some(cover) = &cover {
+            self.covers.write().insert(id.into(), cover.clone());
+        } else {
+            self.covers.write().remove(id);
+        }
+        changed();
         let pending: Vec<_> = self
             .db
             .episodes(id)?
@@ -164,13 +189,12 @@ impl Core {
         self.db.phase(id, "publishing", None)?;
         log::info!("Publishing RSS source={id}");
         changed();
-        let key = format!("{}/rss.xml", source.folder);
-        let feed_url = storage.url(&key)?;
-        let feed = crate::rss::render(&self.db.source(id)?, &self.db.episodes(id)?, &feed_url);
-        // Use the generic XML MIME type so browsers display the feed in their XML viewer.
-        retry(&format!("Publish RSS source={id}"), || {
-            storage.put_text(&key, feed.clone(), "application/xml; charset=utf-8")
-        })
+        let feed_url = publish(
+            &self.db.source(id)?,
+            &self.db.episodes(id)?,
+            storage,
+            cover.as_deref(),
+        )
         .await?;
         self.db.published(id, &feed_url)?;
         log::info!("RSS published source={id}");
@@ -232,6 +256,73 @@ impl Core {
         Ok(())
     }
 }
+
+fn load_covers(directory: &Path, sources: &[Source]) -> HashMap<String, Arc<Cover>> {
+    sources
+        .iter()
+        .filter_map(|source| {
+            let path = directory.join("covers").join(&source.folder);
+            let cover = std::fs::read(path)
+                .ok()
+                .and_then(|bytes| Cover::from_bytes(bytes).ok())?;
+            Some((source.id.clone(), Arc::new(cover)))
+        })
+        .collect()
+}
+
+fn cache_cover(directory: &Path, source: &Source, cover: Option<&Cover>) -> Result<()> {
+    let directory = directory.join("covers");
+    let path = directory.join(&source.folder);
+    if let Some(cover) = cover {
+        use std::io::Write;
+        std::fs::create_dir_all(&directory)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+        temporary.write_all(&cover.bytes)?;
+        temporary.persist(path).context("Save cover image")?;
+    } else if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(error).context("Remove cover image");
+    }
+    Ok(())
+}
+
+async fn publish(
+    source: &Source,
+    episodes: &[Episode],
+    storage: &Storage,
+    cover: Option<&Cover>,
+) -> Result<String> {
+    let cover_url = if let Some(cover) = cover {
+        let key = format!("{}/cover.{}", source.folder, cover.extension);
+        log::info!(
+            "Uploading cover source={} bytes={}",
+            source.id,
+            cover.bytes.len()
+        );
+        retry(&format!("Upload cover source={}", source.id), || {
+            storage.put_bytes(&key, cover.bytes.clone(), cover.mime)
+        })
+        .await?;
+        let mut url = url::Url::parse(&storage.url(&key)?)?;
+        // Podcast clients need a changed artwork URL to refresh their cached image.
+        url.query_pairs_mut()
+            .append_pair("v", &format!("{:x}", Sha256::digest(&cover.bytes)));
+        Some(url.to_string())
+    } else {
+        None
+    };
+    let key = format!("{}/rss.xml", source.folder);
+    let feed_url = storage.url(&key)?;
+    let feed = crate::rss::render(source, episodes, &feed_url, cover_url.as_deref());
+    // Use the generic XML MIME type so browsers display the feed in their XML viewer.
+    retry(&format!("Publish RSS source={}", source.id), || {
+        storage.put_text(&key, feed.clone(), "application/xml; charset=utf-8")
+    })
+    .await?;
+    Ok(feed_url)
+}
+
 pub async fn retry<T, F, Fut>(label: &str, mut operation: F) -> Result<T>
 where
     F: FnMut() -> Fut,
@@ -292,10 +383,13 @@ impl Engine {
         }
         state.write().configured = storage.is_some();
         state.write().sources = core.db.sources()?;
+        state.write().covers = core.covers.read().clone();
         runtime.spawn(async move {
             let changed = || {
                 if let Ok(sources) = core.db.sources() {
-                    state.write().sources = sources;
+                    let mut state = state.write();
+                    state.sources = sources;
+                    state.covers = core.covers.read().clone();
                 }
             };
             let mut interval = tokio::time::interval(Duration::from_secs(30));
@@ -395,4 +489,261 @@ pub fn data_directory() -> Result<PathBuf> {
         .context("Find application support directory")?
         .data_dir()
         .join("Mazit"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::StorageConfig;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::atomic::{AtomicBool, Ordering},
+        thread::JoinHandle,
+    };
+
+    struct Upload {
+        headers: String,
+        body: Vec<u8>,
+    }
+
+    impl Upload {
+        fn path(&self) -> &str {
+            self.headers
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .split('?')
+                .next()
+                .unwrap()
+        }
+    }
+
+    struct MockStorage {
+        storage: Storage,
+        uploads: Arc<parking_lot::Mutex<Vec<Upload>>>,
+        stop: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl MockStorage {
+        fn new(reject_covers: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let storage = Storage::new(StorageConfig::S3 {
+                endpoint: format!("http://{}", listener.local_addr().unwrap()),
+                region: "test".into(),
+                bucket: "podcasts".into(),
+                root: "library".into(),
+                public_base_url: "https://audio.example.com/public".into(),
+                access_key_id: "test".into(),
+                secret_access_key: "test".into(),
+            })
+            .unwrap();
+            let uploads = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let received = uploads.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopping = stop.clone();
+            let worker = std::thread::spawn(move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    let (mut socket, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                        Err(error) => panic!("{error}"),
+                    };
+                    socket.set_nonblocking(false).unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    let header_end = loop {
+                        let count = socket.read(&mut buffer).unwrap();
+                        assert!(count > 0);
+                        request.extend_from_slice(&buffer[..count]);
+                        if let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                        {
+                            break index + 4;
+                        }
+                    };
+                    let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                    assert!(headers.starts_with("PUT "));
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    while request.len() < header_end + length {
+                        let count = socket.read(&mut buffer).unwrap();
+                        assert!(count > 0);
+                        request.extend_from_slice(&buffer[..count]);
+                    }
+                    let reject =
+                        reject_covers && headers.lines().next().unwrap().contains("/cover.");
+                    received.lock().push(Upload {
+                        headers,
+                        body: request[header_end..].to_vec(),
+                    });
+                    let status = if reject { "403 Forbidden" } else { "200 OK" };
+                    write!(
+                        socket,
+                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .unwrap();
+                }
+            });
+            Self {
+                storage,
+                uploads,
+                stop,
+                worker: Some(worker),
+            }
+        }
+    }
+
+    impl Drop for MockStorage {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            let result = self.worker.take().unwrap().join();
+            if !std::thread::panicking() {
+                result.unwrap();
+            }
+        }
+    }
+
+    fn source(kind: &str) -> Source {
+        let db = Database::open(Path::new(":memory:")).unwrap();
+        let id = db
+            .add(
+                kind,
+                "test",
+                "https://www.youtube.com/playlist?list=test&view=1",
+            )
+            .unwrap();
+        db.snapshot(
+            &id,
+            &crate::youtube::Snapshot {
+                title: "Arts & <Crafts>".into(),
+                description: "Description".into(),
+                cover_url: None,
+                videos: Vec::new(),
+            },
+        )
+        .unwrap();
+        db.source(&id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn publishes_cover_before_rss_with_public_artwork_urls() {
+        let mock = MockStorage::new(false);
+        for (kind, bytes, mime, extension) in [
+            (
+                "playlist",
+                b"\xff\xd8\xff\xe0".to_vec(),
+                "image/jpeg",
+                "jpg",
+            ),
+            ("channel", b"\x89PNG\r\n\x1a\n".to_vec(), "image/png", "png"),
+        ] {
+            let source = source(kind);
+            let cover = Cover {
+                bytes,
+                mime,
+                extension,
+            };
+            let feed_url = publish(&source, &[], &mock.storage, Some(&cover))
+                .await
+                .unwrap();
+            assert_eq!(
+                feed_url,
+                format!("https://audio.example.com/public/library/{kind}-test/rss.xml")
+            );
+            let uploads = mock.uploads.lock();
+            let image = &uploads[uploads.len() - 2];
+            let rss = &uploads[uploads.len() - 1];
+            assert_eq!(
+                image.path(),
+                format!("/podcasts/library/{kind}-test/cover.{extension}")
+            );
+            assert!(
+                image
+                    .headers
+                    .to_ascii_lowercase()
+                    .contains(&format!("content-type: {mime}\r\n"))
+            );
+            assert_eq!(image.body, cover.bytes);
+            assert_eq!(rss.path(), format!("/podcasts/library/{kind}-test/rss.xml"));
+            assert!(
+                rss.headers
+                    .to_ascii_lowercase()
+                    .contains("content-type: application/xml; charset=utf-8\r\n")
+            );
+            let feed = std::str::from_utf8(&rss.body).unwrap();
+            let cover_url = format!(
+                "https://audio.example.com/public/library/{kind}-test/cover.{extension}?v={:x}",
+                Sha256::digest(&cover.bytes)
+            );
+            assert!(feed.contains(&format!("<image><url>{cover_url}</url><title>Arts &amp; &lt;Crafts&gt;</title><link>https://www.youtube.com/playlist?list=test&amp;view=1</link></image>")));
+            assert!(feed.contains(&format!("<itunes:image href=\"{cover_url}\"/>")));
+        }
+    }
+
+    #[test]
+    fn cover_cache_survives_restart_and_tracks_replacements_and_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = source("playlist");
+        let sources = std::slice::from_ref(&source);
+        assert!(load_covers(directory.path(), sources).is_empty());
+        for bytes in [b"\xff\xd8\xff\xe0".to_vec(), b"\x89PNG\r\n\x1a\n".to_vec()] {
+            let cover = Cover::from_bytes(bytes).unwrap();
+            cache_cover(directory.path(), &source, Some(&cover)).unwrap();
+            let restored = load_covers(directory.path(), sources);
+            assert_eq!(restored[&source.id].bytes, cover.bytes);
+            assert_eq!(restored[&source.id].mime, cover.mime);
+        }
+        cache_cover(directory.path(), &source, None).unwrap();
+        assert!(load_covers(directory.path(), sources).is_empty());
+        cache_cover(directory.path(), &source, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_cover_upload_does_not_publish_rss() {
+        let mock = MockStorage::new(true);
+        let cover = Cover {
+            bytes: b"\xff\xd8\xff\xe0".to_vec(),
+            mime: "image/jpeg",
+            extension: "jpg",
+        };
+        assert!(
+            publish(&source("playlist"), &[], &mock.storage, Some(&cover))
+                .await
+                .is_err()
+        );
+        let uploads = mock.uploads.lock();
+        assert_eq!(uploads.len(), 3);
+        assert!(
+            uploads
+                .iter()
+                .all(|upload| upload.path() == "/podcasts/library/playlist-test/cover.jpg")
+        );
+    }
+
+    #[tokio::test]
+    async fn source_without_cover_publishes_rss_without_artwork_tags() {
+        let mock = MockStorage::new(false);
+        publish(&source("playlist"), &[], &mock.storage, None)
+            .await
+            .unwrap();
+        let uploads = mock.uploads.lock();
+        assert_eq!(uploads.len(), 1);
+        let feed = std::str::from_utf8(&uploads[0].body).unwrap();
+        assert!(!feed.contains("<image>"));
+        assert!(!feed.contains("<itunes:image"));
+    }
 }

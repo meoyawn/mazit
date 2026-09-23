@@ -10,7 +10,12 @@ fn xml(text: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
-pub fn render(source: &Source, episodes: &[Episode], feed_url: &str) -> String {
+pub fn render(
+    source: &Source,
+    episodes: &[Episode],
+    feed_url: &str,
+    cover_url: Option<&str>,
+) -> String {
     let mut feed = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\"><channel><title>{}</title><link>{}</link><description>{}</description><language>en</language><ttl>60</ttl><lastBuildDate>{}</lastBuildDate><atom:link href=\"{}\" rel=\"self\" type=\"application/rss+xml\"/>",
         xml(&source.title),
@@ -19,6 +24,15 @@ pub fn render(source: &Source, episodes: &[Episode], feed_url: &str) -> String {
         chrono::Utc::now().to_rfc2822(),
         xml(feed_url)
     );
+    if let Some(cover_url) = cover_url {
+        feed.push_str(&format!(
+            "<image><url>{}</url><title>{}</title><link>{}</link></image><itunes:image href=\"{}\"/>",
+            xml(cover_url),
+            xml(&source.title),
+            xml(&source.url),
+            xml(cover_url),
+        ));
+    }
     for episode in episodes
         .iter()
         .filter(|e| e.present && e.state == "uploaded")

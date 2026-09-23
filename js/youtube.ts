@@ -134,6 +134,7 @@ async function operation(method: string, json: string): Promise<string> {
     return JSON.stringify({
       title: page.info.title,
       description: page.info.description || "",
+      cover_url: page.info.thumbnails?.[0]?.url || null,
       count: page.info.total_items,
       continuation: page.has_continuation,
       suspicious: !!page.messages?.length,
@@ -145,6 +146,10 @@ async function operation(method: string, json: string): Promise<string> {
     return JSON.stringify({
       title: channel.metadata.title,
       description: channel.metadata.description || "",
+      cover_url:
+        channel.metadata.avatar?.[0]?.url ||
+        channel.metadata.thumbnail?.[0]?.url ||
+        null,
     });
   }
   if (method === "media") {

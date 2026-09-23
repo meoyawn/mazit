@@ -4,11 +4,14 @@ use crate::{
 };
 use gpui::*;
 use gpui_component::{
-    Disableable, Root, StyledExt,
+    Disableable, Icon as UiIcon, IconName, Root, Sizable, StyledExt,
     button::{Button, ButtonVariants},
+    clipboard::Clipboard,
     input::{Input, InputState},
+    link::Link,
+    tooltip::Tooltip,
 };
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
@@ -17,6 +20,7 @@ use tray_icon::{
 struct MazitView {
     engine: Engine,
     source: Entity<InputState>,
+    cover_images: HashMap<String, Arc<Image>>,
     _tray: TrayIcon,
     open_id: tray_icon::menu::MenuId,
     refresh_id: tray_icon::menu::MenuId,
@@ -57,6 +61,7 @@ impl MazitView {
             false
         });
         let mut last_state = engine.state.read().clone();
+        let cover_images = build_cover_images(&last_state);
         cx.spawn_in(window, async move |view, cx| {
             loop {
                 cx.background_executor()
@@ -80,6 +85,9 @@ impl MazitView {
                         hide_if_minimized();
                         let state = view.engine.state.read().clone();
                         if state != last_state {
+                            if state.covers != last_state.covers {
+                                view.cover_images = build_cover_images(&state);
+                            }
                             last_state = state;
                             // Sync state lives outside GPUI. Invalidate the whole window so
                             // completion is painted even without a mouse or keyboard event.
@@ -97,6 +105,7 @@ impl MazitView {
         Self {
             engine,
             source,
+            cover_images,
             _tray: tray,
             open_id: open.id().clone(),
             refresh_id: refresh.id().clone(),
@@ -126,9 +135,10 @@ impl MazitView {
 impl Render for MazitView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.engine.state.read().clone();
-        let mut sidebar = div()
+        let sidebar = div()
             .v_flex()
             .w(px(240.))
+            .flex_shrink_0()
             .h_full()
             .bg(rgb(0xedf0f6))
             .p_6()
@@ -164,30 +174,17 @@ impl Render for MazitView {
                 Button::new("open-logs")
                     .label("Open logs")
                     .on_click(cx.listener(|this, _, _, cx| this.open_logs(cx))),
-            );
-        for source in &state.sources {
-            sidebar = sidebar.child(
+            )
+            .child(div().flex_1())
+            .child(
                 div()
-                    .v_flex()
-                    .gap_1()
-                    .p_3()
-                    .rounded_lg()
-                    .bg(rgb(0xffffff))
-                    .child(source.title.clone())
-                    .child(div().text_xs().text_color(rgb(0x7d8597)).child(format!(
-                        "{} / {} · {}",
-                        source.uploaded, source.total, source.phase
-                    ))),
+                    .text_xs()
+                    .child("Checks every hour\nContinues in the menu bar"),
             );
-        }
-        sidebar = sidebar.child(div().flex_1()).child(
-            div()
-                .text_xs()
-                .child("Checks every hour\nContinues in the menu bar"),
-        );
         let mut content = div()
             .v_flex()
             .flex_1()
+            .min_w_0()
             .h_full()
             .p_8()
             .gap_5()
@@ -232,7 +229,7 @@ impl Render for MazitView {
                     .rounded_xl()
                     .bg(rgb(0xffffff))
                     .child("Fill in the [s3] section of ~/.config/mazit/config.toml, save it, then select Reload config.")
-                    .child("Your public base URL must serve RSS and audio files directly, without a login.")
+                    .child("Your public base URL must serve RSS, audio, and cover images directly, without a login.")
                     .child(Button::new("open-config")
                         .primary()
                         .label("Open config.toml")
@@ -268,50 +265,183 @@ impl Render for MazitView {
                 .v_flex()
                 .overflow_y_scroll()
                 .gap_5()
+                .min_h_0()
                 .flex_1();
             if state.sources.is_empty() {
                 list=list.child(div().p_8().child("Add your first playlist or channel. Mazit downloads audio, prepares fast-start M4A files, and publishes RSS to your storage."));
             }
-            for (index, source) in state.sources.iter().enumerate() {
+            for source in &state.sources {
                 let id = source.id.clone();
-                let feed = source.feed_url.clone();
-                let mut card = div()
+                let element_id = ElementId::from(SharedString::from(id.clone()));
+                let cover = match self.cover_images.get(&source.id) {
+                    Some(image) => img(image.clone())
+                        .size_full()
+                        .object_fit(ObjectFit::Cover)
+                        .with_fallback(cover_placeholder)
+                        .into_any_element(),
+                    None => cover_placeholder(),
+                };
+                let cover = div()
+                    .size(px(112.))
+                    .flex_shrink_0()
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .child(cover);
+                let (status, status_color) = match source.phase.as_str() {
+                    "idle" if source.feed_url.is_some() => ("Up to date", 0x36826c),
+                    "idle" => ("Waiting to sync", 0x7d8597),
+                    "error" => ("Needs attention", 0xb64c48),
+                    "scanning" => ("Scanning", 0x526bbe),
+                    "downloading" => ("Downloading", 0x526bbe),
+                    "publishing" => ("Publishing", 0x526bbe),
+                    "cleaning" => ("Finishing up", 0x526bbe),
+                    _ => ("Syncing", 0x526bbe),
+                };
+                let mut details = div()
                     .v_flex()
+                    .flex_1()
+                    .min_w_0()
                     .gap_3()
-                    .p_5()
-                    .bg(rgb(0xffffff))
-                    .rounded_xl()
-                    .child(div().text_xl().child(source.title.clone()))
-                    .child(format!(
-                        "{} of {} uploaded · {}",
-                        source.uploaded, source.total, source.phase
-                    ))
                     .child(
-                        Button::new(("source-refresh", index))
-                            .label("Refresh")
-                            .disabled(state.busy)
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                this.engine.command(Command::Refresh(Some(id.clone())))
-                            })),
+                        div()
+                            .h_flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .text_xl()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(source.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .h_flex()
+                                    .gap_1p5()
+                                    .text_xs()
+                                    .text_color(rgb(status_color))
+                                    .child(div().size(px(6.)).rounded_full().bg(rgb(status_color)))
+                                    .child(status),
+                            )
+                            .child(
+                                Button::new((element_id.clone(), "refresh"))
+                                    .icon(UiIcon::default().path("icons/refresh.svg"))
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Refresh subscription")
+                                    .disabled(state.busy)
+                                    .on_click(cx.listener(move |this, _, _, _| {
+                                        this.engine.command(Command::Refresh(Some(id.clone())))
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h_flex()
+                            .gap_3()
+                            .text_sm()
+                            .child(
+                                Link::new((element_id.clone(), "youtube"))
+                                    .href(source.url.clone())
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_color(rgb(0x526bbe))
+                                    .child(if source.kind == "channel" {
+                                        "YouTube channel"
+                                    } else {
+                                        "YouTube playlist"
+                                    })
+                                    .child(UiIcon::new(IconName::ExternalLink).size(px(12.))),
+                            )
+                            .child(
+                                div().text_color(rgb(0x7d8597)).child(format!(
+                                    "{} / {} episodes",
+                                    source.uploaded, source.total
+                                )),
+                            ),
                     );
                 if let Some(error) = &source.error {
-                    card = card.child(
+                    details = details.child(
                         div()
                             .text_color(rgb(0xb64c48))
                             .text_sm()
                             .child(error.clone()),
                     );
                 }
-                if let Some(url) = feed {
-                    card = card.child(div().text_sm().child(url.clone())).child(
-                        Button::new(("copy", index)).label("Copy RSS URL").on_click(
-                            move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(url.clone()))
-                            },
-                        ),
+                if let Some(url) = &source.feed_url {
+                    let tooltip_url = url.clone();
+                    details = details.child(
+                        div()
+                            .h_flex()
+                            .min_w_0()
+                            .gap_3()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(0xe4e8f0))
+                            .bg(rgb(0xf8f9fc))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(0xa36932))
+                                    .child("RSS"),
+                            )
+                            .child(
+                                div()
+                                    .id((element_id.clone(), "feed-url"))
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(tooltip_url.clone()).build(window, cx)
+                                    })
+                                    .child(
+                                        Link::new((element_id.clone(), "feed-link"))
+                                            .href(url.clone())
+                                            .text_sm()
+                                            .text_color(rgb(0x68738a))
+                                            .truncate()
+                                            .child(url.clone()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id((element_id.clone(), "copy-tooltip"))
+                                    .flex_shrink_0()
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Copy RSS URL").build(window, cx)
+                                    })
+                                    .child(
+                                        Clipboard::new((element_id.clone(), "copy"))
+                                            .value(url.clone()),
+                                    ),
+                            ),
+                    );
+                } else {
+                    details = details.child(
+                        div()
+                            .text_sm()
+                            .text_color(rgb(0x7d8597))
+                            .child("RSS feed will appear after the first sync"),
                     );
                 }
-                list = list.child(card);
+                list = list.child(
+                    div()
+                        .h_flex()
+                        .items_start()
+                        .flex_shrink_0()
+                        .gap_5()
+                        .p_5()
+                        .bg(rgb(0xffffff))
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(rgb(0xe8ecf3))
+                        .child(cover)
+                        .child(details),
+                );
             }
             content = content.child(list);
         }
@@ -334,8 +464,58 @@ impl Render for MazitView {
     }
 }
 
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if path == "icons/refresh.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "../assets/refresh.svg"
+            ))));
+        }
+        gpui_component_assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        let mut assets = gpui_component_assets::Assets.list(path)?;
+        if "icons/refresh.svg".starts_with(path) {
+            assets.push("icons/refresh.svg".into());
+        }
+        Ok(assets)
+    }
+}
+
+fn build_cover_images(state: &crate::engine::ViewState) -> HashMap<String, Arc<Image>> {
+    state
+        .covers
+        .iter()
+        .filter_map(|(id, cover)| {
+            let format = ImageFormat::from_mime_type(cover.mime)?;
+            Some((
+                id.clone(),
+                Arc::new(Image::from_bytes(format, cover.bytes.clone())),
+            ))
+        })
+        .collect()
+}
+
+fn cover_placeholder() -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .size(px(112.))
+        .flex_shrink_0()
+        .rounded_lg()
+        .bg(rgb(0xedf0f6))
+        .text_color(rgb(0x7d8597))
+        .text_2xl()
+        .child("♫")
+        .into_any_element()
+}
+
 pub fn run(engine: Engine) {
-    let app = Application::new();
+    let app = Application::new().with_assets(Assets);
     app.on_reopen(|cx| {
         show_window();
         cx.activate(true);

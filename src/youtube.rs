@@ -49,6 +49,7 @@ pub struct MediaRequest {
 pub struct Snapshot {
     pub title: String,
     pub description: String,
+    pub cover_url: Option<String>,
     pub videos: Vec<Video>,
 }
 
@@ -173,6 +174,7 @@ impl YouTube {
         let mut expected = None;
         let mut title = String::new();
         let mut description = String::new();
+        let mut cover_url = None;
         loop {
             let page = self
                 .call(
@@ -187,6 +189,7 @@ impl YouTube {
             if pages.is_empty() {
                 title = page["title"].as_str().unwrap_or(id).into();
                 description = page["description"].as_str().unwrap_or("").into();
+                cover_url = page["cover_url"].as_str().map(str::to_owned);
                 expected = page["count"]
                     .as_str()
                     .and_then(|text| text.split_whitespace().next())
@@ -224,10 +227,12 @@ impl YouTube {
             let channel = self.call("channel", json!({"id": id})).await?;
             title = channel["title"].as_str().unwrap_or(&title).into();
             description = channel["description"].as_str().unwrap_or("").into();
+            cover_url = channel["cover_url"].as_str().map(str::to_owned);
         }
         Ok(Snapshot {
             title,
             description,
+            cover_url,
             videos,
         })
     }
@@ -323,6 +328,75 @@ async fn fetch_metadata(client: Client, json: String) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn responses(responses: Vec<(&'static str, Value, Value)>) -> YouTube {
+        let (sender, mut receiver) = mpsc::channel::<Request>(32);
+        tokio::spawn(async move {
+            for (method, args, value) in responses {
+                let request = receiver.recv().await.unwrap();
+                assert_eq!(request.method, method);
+                assert_eq!(request.args, args);
+                request.result.send(Ok(value)).unwrap();
+            }
+        });
+        YouTube { sender }
+    }
+
+    #[tokio::test]
+    async fn playlist_cover_survives_continuation_pages() {
+        let youtube = responses(vec![
+            (
+                "page",
+                json!({"id": "PLtest", "continuation": false}),
+                json!({
+                    "title": "Playlist", "description": "Description", "count": "2 videos",
+                    "cover_url": "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg",
+                    "continuation": true,
+                    "videos": [{"id": "abcdefghijk", "title": "First", "duration": 10, "available": true}]
+                }),
+            ),
+            (
+                "page",
+                json!({"id": "PLtest", "continuation": true}),
+                json!({
+                    "cover_url": null, "continuation": false,
+                    "videos": [{"id": "lmnopqrstuv", "title": "Second", "duration": 20, "available": true}]
+                }),
+            ),
+        ]);
+        let snapshot = youtube.snapshot("playlist", "PLtest").await.unwrap();
+        assert_eq!(
+            snapshot.cover_url.as_deref(),
+            Some("https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg")
+        );
+        assert_eq!(snapshot.videos.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn channel_cover_replaces_uploads_playlist_cover() {
+        for cover_url in [Some("https://yt3.googleusercontent.com/avatar"), None] {
+            let youtube = responses(vec![
+                (
+                    "page",
+                    json!({"id": "UUtest", "continuation": false}),
+                    json!({
+                        "title": "Uploads", "count": "0 videos", "videos": [],
+                        "cover_url": "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg"
+                    }),
+                ),
+                (
+                    "channel",
+                    json!({"id": "UCtest"}),
+                    json!({
+                        "title": "Channel", "description": "About", "cover_url": cover_url
+                    }),
+                ),
+            ]);
+            let snapshot = youtube.snapshot("channel", "UCtest").await.unwrap();
+            assert_eq!(snapshot.title, "Channel");
+            assert_eq!(snapshot.cover_url.as_deref(), cover_url);
+        }
+    }
 
     #[tokio::test]
     async fn bun_bundle_initializes_in_quickjs() {

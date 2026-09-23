@@ -1,8 +1,10 @@
 # Mazit
 
-Mazit is a macOS desktop app that syncs YouTube content to your own S3-compatible storage in the background. Add a playlist or channel, and Mazit periodically checks for new videos, downloads their audio, prepares playable fast-start M4A files, uploads them to storage, and publishes an `rss.xml` podcast feed for each source. Syncing continues while the app runs in the menu bar.
+Mazit is a macOS desktop app that syncs YouTube content to your own S3-compatible storage in the background. Add a playlist or channel, and Mazit periodically checks for new videos, downloads their audio, prepares playable fast-start M4A files, uploads them and the source's cover image to storage, and publishes an `rss.xml` podcast feed for each source. The feed links to the uploaded cover for podcast artwork. Syncing continues while the app runs in the menu bar.
 
-Select **Copy RSS URL** in Mazit and add the feed to Apple Podcasts, Pocket Casts, or another podcast app. Your podcast player streams episodes from your public storage URL while Mazit keeps the feed up to date. Storage must provide direct public URLs for feeds and audio. S3 settings and credentials live in `~/.config/mazit/config.toml`.
+Select **Copy RSS URL** in Mazit and add the feed to Apple Podcasts, Pocket Casts, or another podcast app. Your podcast player streams episodes from your public storage URL while Mazit keeps the feed up to date. Storage must provide direct public URLs for feeds, audio, and cover images. S3 settings and credentials live in `~/.config/mazit/config.toml`.
+
+The library shows each subscription once, with its cover, a link to the original YouTube source, sync status, and a compact RSS field with a copy button. Cover images are cached locally so they remain visible after restarting Mazit.
 
 [Cloudflare R2 setup and CDN guide](docs/cloudflare-r2.md) — storage credentials, free CDN features, request budgets, byte-range playback, and ETag checks.
 

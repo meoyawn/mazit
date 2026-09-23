@@ -233,16 +233,19 @@ impl Storage {
         result
     }
     pub async fn put_text(&self, key: &str, text: String, mime: &str) -> Result<()> {
+        self.put_bytes(key, text.into_bytes(), mime).await
+    }
+    pub async fn put_bytes(&self, key: &str, bytes: Vec<u8>, mime: &str) -> Result<()> {
         self.client
             .put_object()
             .bucket(&self.bucket)
             .key(self.object_key(key)?)
-            .body(ByteStream::from(text.into_bytes()))
+            .body(ByteStream::from(bytes))
             .content_type(mime)
             .cache_control("no-cache")
             .send()
             .await
-            .map_err(|error| storage_error("upload text", error))?;
+            .map_err(|error| storage_error("upload", error))?;
         Ok(())
     }
     pub async fn delete(&self, key: &str) -> Result<()> {
