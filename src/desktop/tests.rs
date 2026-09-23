@@ -116,6 +116,32 @@ fn refresh_dispatches_the_selected_source_and_respects_busy_state(cx: &mut TestA
 }
 
 #[gpui::test]
+fn delete_remains_available_during_sync_and_can_retry_a_failure(cx: &mut TestAppContext) {
+    let mut state = library();
+    state.busy = true;
+    state.sources[0].phase = "downloading".into();
+    let (_, engine, mut commands, cx) = setup(cx, state);
+    click(cx, "playlist:test:delete");
+    assert!(matches!(commands.try_recv().unwrap(), Command::Delete(id) if id == "playlist:test"));
+    engine.state.write().sources[0].phase = "deleting".into();
+    cx.background_executor
+        .advance_clock(Duration::from_millis(500));
+    click(cx, "playlist:test:delete");
+    assert!(commands.try_recv().is_err());
+    {
+        let mut state = engine.state.write();
+        state.busy = false;
+        state.sources[0].phase = "delete_error".into();
+    }
+    cx.background_executor
+        .advance_clock(Duration::from_millis(500));
+    click(cx, "playlist:test:refresh");
+    assert!(commands.try_recv().is_err());
+    click(cx, "playlist:test:delete");
+    assert!(matches!(commands.try_recv().unwrap(), Command::Delete(id) if id == "playlist:test"));
+}
+
+#[gpui::test]
 fn typing_and_adding_a_source_dispatches_once_and_clears_input(cx: &mut TestAppContext) {
     let (view, _, mut commands, cx) = setup(cx, library());
     let url = "https://www.youtube.com/playlist?list=PLexample";
@@ -139,12 +165,15 @@ fn artwork_and_controls_stay_inside_the_card_at_supported_window_sizes(cx: &mut 
         let cover = cx.debug_bounds("playlist:test:cover").unwrap();
         let details = cx.debug_bounds("playlist:test:details").unwrap();
         let copy = cx.debug_bounds("playlist:test:copy").unwrap();
+        let delete = cx.debug_bounds("playlist:test:delete").unwrap();
         assert_eq!(cover.size, size(px(112.), px(112.)));
         assert!(card.left() >= sidebar.right());
         assert!(cover.left() > card.left() && cover.top() > card.top());
         assert!(cover.right() < details.left());
         assert!(copy.right() < card.right());
         assert!(copy.bottom() < card.bottom());
+        assert!(delete.right() < card.right() && delete.left() > details.left());
+        assert!(delete.top() > card.top() && delete.bottom() < card.bottom());
     }
 }
 

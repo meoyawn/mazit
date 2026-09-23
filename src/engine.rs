@@ -16,7 +16,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ViewState {
@@ -28,6 +29,7 @@ pub struct ViewState {
 }
 pub enum Command {
     Add(String),
+    Delete(String),
     Refresh(Option<String>),
     ReloadConfig,
 }
@@ -92,15 +94,16 @@ impl Core {
     pub fn bind_storage(&self, identity: &str) -> Result<()> {
         config::bind_storage(&self.directory, identity, !self.db.sources()?.is_empty())
     }
-    pub async fn sync(
+    async fn sync(
         &self,
         id: &str,
         storage: &Storage,
         changed: &(dyn Fn() + Sync),
+        workers: &TaskTracker,
     ) -> Result<()> {
         let started = Instant::now();
         log::info!("Sync started source={id}");
-        let result = self.sync_inner(id, storage, changed).await;
+        let result = self.sync_inner(id, storage, changed, workers).await;
         if let Err(error) = &result {
             log::error!(
                 "Sync failed source={id} elapsed={:.1}s: {error:#}",
@@ -123,6 +126,7 @@ impl Core {
         id: &str,
         storage: &Storage,
         changed: &(dyn Fn() + Sync),
+        workers: &TaskTracker,
     ) -> Result<()> {
         let source = self.db.source(id)?;
         log::info!("Scanning source={id}");
@@ -176,7 +180,7 @@ impl Core {
                 for attempt in 1..=3 {
                     transfer.attempt(attempt);
                     outcome = self
-                        .transfer(source_ref, &episode, storage, &transfer)
+                        .transfer(source_ref, &episode, storage, &transfer, workers)
                         .await;
                     if let Err(error) = &outcome {
                         transfer.error(error);
@@ -209,13 +213,21 @@ impl Core {
         self.db.phase(id, "publishing", None)?;
         log::info!("Publishing RSS source={id}");
         changed();
-        let feed_url = publish(
-            &self.db.source(id)?,
-            &self.db.episodes(id)?,
-            storage,
-            cover.as_deref(),
-        )
-        .await?;
+        let published_source = self.db.source(id)?;
+        let episodes = self.db.episodes(id)?;
+        let publishing_storage = storage.clone();
+        let feed_url = workers
+            .spawn(async move {
+                publish(
+                    &published_source,
+                    &episodes,
+                    &publishing_storage,
+                    cover.as_deref(),
+                )
+                .await
+            })
+            .await
+            .context("Publication worker stopped")??;
         self.db.published(id, &feed_url)?;
         log::info!("RSS published source={id}");
         // Publication happens before deletion, so a failed upload never breaks the previous feed.
@@ -241,12 +253,15 @@ impl Core {
         episode: &Episode,
         storage: &Storage,
         transfer: &Transfer,
+        workers: &TaskTracker,
     ) -> Result<()> {
         let started = Instant::now();
         let id = &episode.video.id;
         log::info!("Resolving audio source={} video={id}", source.id);
         let request = self.youtube.media(id).await.context("Resolve audio")?;
-        with_transfer_directory(&self.directory.join("transfers"), |temp| async move {
+        let directory = self.transfer_directory(source);
+        std::fs::create_dir_all(&directory)?;
+        with_transfer_directory(&directory, |temp| async move {
             let input = temp.path().join("download");
             let output = temp.path().join("audio.m4a");
             log::info!(
@@ -270,19 +285,29 @@ impl Core {
             let audio = output.clone();
             // Keep ownership in the blocking worker too: cancellation cannot orphan its output.
             let worker_directory = temp.clone();
-            let bytes = tokio::task::spawn_blocking(move || {
-                let _directory = worker_directory;
-                crate::audio::prepare_m4a(&input, &audio)
-            })
-            .await
-            .context("Audio worker stopped")?
-            .context("Prepare M4A")?;
+            let cancelled = CancellationToken::new();
+            let _cancel = cancelled.clone().drop_guard();
+            let bytes = workers
+                .spawn_blocking(move || {
+                    let _directory = worker_directory;
+                    crate::audio::prepare_m4a(&input, &audio, &cancelled)
+                })
+                .await
+                .context("Audio worker stopped")?
+                .context("Prepare M4A")?;
             let key = format!("{}/{}.m4a", source.folder, episode.video.id);
             log::info!("Uploading audio video={id} bytes={bytes}");
             transfer.phase(Phase::Uploading);
-            storage
-                .put_file(&key, &output)
+            let upload_storage = storage.clone();
+            let upload_key = key.clone();
+            let upload_directory = temp.clone();
+            workers
+                .spawn(async move {
+                    let _directory = upload_directory;
+                    upload_storage.put_file(&upload_key, &output).await
+                })
                 .await
+                .context("Upload worker stopped")?
                 .context("Upload audio")?;
             let mut video = episode.video.clone();
             video.title = request.title;
@@ -299,6 +324,80 @@ impl Core {
             Ok(())
         })
         .await
+    }
+
+    fn transfer_directory(&self, source: &Source) -> PathBuf {
+        self.directory
+            .join("transfers")
+            .join(format!("mazit-{}", source.folder))
+    }
+
+    async fn delete(&self, id: &str, storage: Option<&Storage>) -> Result<()> {
+        let source = self.db.source(id)?;
+        self.db.phase(id, "deleting", None)?;
+        let result: Result<()> = async {
+            cache_cover(&self.directory, &source, None)?;
+            self.covers.write().remove(id);
+            self.downloads.remove_source(id);
+            if let Err(error) = std::fs::remove_dir_all(self.transfer_directory(&source))
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error).context("Remove podcast audio files");
+            }
+            storage
+                .context("Load storage configuration, then retry deleting this podcast")?
+                .delete_folder(&source.folder)
+                .await?;
+            self.db.delete_source(id)?;
+            log::info!("Podcast deleted source={id}");
+            Ok(())
+        }
+        .await;
+        if let Err(error) = &result {
+            self.db.phase(
+                id,
+                "delete_error",
+                Some(&crate::redact(&format!("{error:#}"))),
+            )?;
+        }
+        result
+    }
+
+    async fn run_source(
+        &self,
+        id: &str,
+        storage: Option<&Storage>,
+        delete: &CancellationToken,
+        slots: &Semaphore,
+        changed: &(dyn Fn() + Sync),
+    ) -> Result<()> {
+        let workers = TaskTracker::new();
+        let write_cancelled = CancellationToken::new();
+        let _cancel_writes = write_cancelled.clone().drop_guard();
+        let storage =
+            storage.map(|storage| storage.with_write_cancellation(write_cancelled.clone()));
+        let result = tokio::select! {
+            biased;
+            _ = delete.cancelled() => None,
+            result = async {
+                let _slot = slots.acquire().await?;
+                self.sync(id, storage.as_ref().context("Fill in config.toml first")?, changed, &workers).await
+            } => Some(result),
+        };
+        // Stop new writes, then drain requests already sent to S3 so a late PUT
+        // cannot recreate an object after the folder has been deleted.
+        write_cancelled.cancel();
+        if result.is_none() {
+            self.downloads.remove_source(id);
+        }
+        workers.close();
+        workers.wait().await;
+        let result = match result {
+            Some(result) => result,
+            None => self.delete(id, storage.as_ref()).await,
+        };
+        changed();
+        result
     }
 }
 
@@ -441,7 +540,7 @@ impl Engine {
 
     pub fn start(core: Core, runtime: &tokio::runtime::Handle) -> Result<Self> {
         let state = Arc::new(RwLock::new(ViewState::default()));
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::unbounded_channel();
         let engine = Self {
             state: state.clone(),
             downloads: core.downloads.clone(),
@@ -478,101 +577,13 @@ impl Engine {
         state.write().configured = storage.is_some();
         state.write().sources = core.db.sources()?;
         state.write().covers = core.covers.read().clone();
-        runtime.spawn(async move {
-            let changed = || {
-                if let Ok(sources) = core.db.sources() {
-                    let mut state = state.write();
-                    state.sources = sources;
-                    state.covers = core.covers.read().clone();
-                }
-            };
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                let command = tokio::select! {
-                    command = receiver.recv() => {
-                        let Some(command) = command else { break };
-                        Some(command)
-                    },
-                    _ = interval.tick() => None,
-                };
-                let mut ids = Vec::new();
-                state.write().busy = true;
-                let operation: Result<()> = async {
-                    match command {
-                        Some(Command::Add(url)) => {
-                            ensure!(storage.is_some(), "Fill in config.toml first");
-                            ids.push(core.add(&url).await?);
-                        }
-                        Some(Command::Refresh(selected)) => {
-                            ids = core
-                                .db
-                                .sources()?
-                                .into_iter()
-                                .filter(|source| {
-                                    selected.as_ref().is_none_or(|id| id == &source.id)
-                                })
-                                .map(|s| s.id)
-                                .collect();
-                        }
-                        Some(Command::ReloadConfig) => {
-                            let settings = config::load(&config_path)?;
-                            let candidate = Storage::new(settings.clone())?;
-                            core.bind_storage(&settings.identity())?;
-                            candidate.verify().await?;
-                            log::info!("Storage configuration reloaded and verified");
-                            storage = Some(candidate);
-                            state.write().configured = true;
-                            state.write().message = "Storage config loaded and verified".into();
-                            ids = core
-                                .db
-                                .sources()?
-                                .into_iter()
-                                .map(|source| source.id)
-                                .collect();
-                        }
-                        None => {
-                            ids = core
-                                .db
-                                .sources()?
-                                .into_iter()
-                                .filter(|s| s.next_sync <= chrono::Utc::now().timestamp())
-                                .map(|s| s.id)
-                                .collect();
-                        }
-                    }
-                    if let Some(storage) = &storage {
-                        // Multiple podcasts can progress, sharing the same transfer budget.
-                        stream::iter(ids)
-                            .for_each_concurrent(4, |id| {
-                                let core = &core;
-                                let changed = &changed;
-                                let state = &state;
-                                async move {
-                                    if let Err(error) = core.sync(&id, storage, changed).await {
-                                        state.write().message = crate::redact(&error.to_string());
-                                    }
-                                }
-                            })
-                            .await;
-                    }
-                    Ok(())
-                }
-                .await;
-                if let Err(error) = operation {
-                    log::error!("Engine operation failed: {error:#}");
-                    state.write().message = crate::redact(&error.to_string());
-                }
-                changed();
-                state.write().busy = false;
-            }
-            log::info!("Sync worker stopped");
-        });
+        runtime.spawn(run_worker(core, storage, config_path, state, receiver));
         Ok(engine)
     }
     pub fn command(&self, command: Command) {
         let name = match &command {
             Command::Add(_) => "add subscription",
+            Command::Delete(_) => "delete podcast",
             Command::Refresh(_) => "refresh",
             Command::ReloadConfig => "reload configuration",
         };
@@ -586,6 +597,153 @@ impl Engine {
         }
     }
 }
+async fn run_worker(
+    core: Core,
+    mut storage: Option<Storage>,
+    config_path: PathBuf,
+    state: Arc<RwLock<ViewState>>,
+    mut receiver: mpsc::UnboundedReceiver<Command>,
+) {
+    let changed = || {
+        if let Ok(sources) = core.db.sources() {
+            let mut state = state.write();
+            state.sources = sources;
+            state.covers = core.covers.read().clone();
+        }
+    };
+    let slots = Semaphore::new(4);
+    let mut running = HashMap::<String, CancellationToken>::new();
+    let mut jobs = stream::FuturesUnordered::new();
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        let command = tokio::select! {
+            biased;
+            command = receiver.recv() => {
+                let Some(command) = command else { break };
+                Some(command)
+            },
+            Some((id, result)) = jobs.next(), if !jobs.is_empty() => {
+                let deleting = running.remove(&id).is_some_and(|delete| delete.is_cancelled());
+                if let Err(error) = result {
+                    log::error!("Podcast operation failed source={id}: {error:#}");
+                    state.write().message = crate::redact(&format!("{error:#}"));
+                } else if deleting {
+                    state.write().message = "Podcast deleted".into();
+                }
+                changed();
+                state.write().busy = !running.is_empty();
+                continue;
+            },
+            _ = interval.tick() => None,
+        };
+        state.write().busy = true;
+        let operation: Result<Vec<(String, bool)>> = async {
+            match command {
+                Some(Command::Delete(id)) => {
+                    if core.db.sources()?.iter().any(|source| source.id == id) {
+                        core.db.phase(&id, "deleting", None)?;
+                        if let Some(delete) = running.get(&id) {
+                            delete.cancel();
+                        } else {
+                            return Ok(vec![(id, true)]);
+                        }
+                    }
+                    Ok(Vec::new())
+                }
+                Some(Command::Add(url)) => {
+                    ensure!(
+                        running.is_empty(),
+                        "Wait for podcast operations before adding a subscription"
+                    );
+                    ensure!(storage.is_some(), "Fill in config.toml first");
+                    let id = core.add(&url).await?;
+                    ensure!(
+                        !core.db.source(&id)?.deletion_pending(),
+                        "Finish deleting this podcast before adding it again"
+                    );
+                    Ok(vec![(id, false)])
+                }
+                command => {
+                    let mut all = false;
+                    let mut selected = None;
+                    match command {
+                        Some(Command::ReloadConfig) => {
+                            // The UI disables config reload while work is active.
+                            ensure!(
+                                running.is_empty(),
+                                "Wait for podcast operations before reloading storage"
+                            );
+                            let settings = config::load(&config_path)?;
+                            let candidate = Storage::new(settings.clone())?;
+                            core.bind_storage(&settings.identity())?;
+                            candidate.verify().await?;
+                            storage = Some(candidate);
+                            state.write().configured = true;
+                            state.write().message = "Storage config loaded and verified".into();
+                            all = true;
+                        }
+                        Some(Command::Refresh(id)) => {
+                            all = true;
+                            selected = id;
+                        }
+                        None => {}
+                        _ => unreachable!(),
+                    }
+                    Ok(core
+                        .db
+                        .sources()?
+                        .into_iter()
+                        .filter(|source| selected.as_ref().is_none_or(|id| id == &source.id))
+                        .filter(|source| source.phase != "delete_error")
+                        .filter(|source| {
+                            source.phase == "deleting"
+                                || (storage.is_some()
+                                    && (all || source.next_sync <= chrono::Utc::now().timestamp()))
+                        })
+                        .map(|source| {
+                            let deleting = source.deletion_pending();
+                            (source.id, deleting)
+                        })
+                        .collect())
+                }
+            }
+        }
+        .await;
+        match operation {
+            Ok(ids) => {
+                for (id, deleting) in ids {
+                    if running.contains_key(&id) {
+                        continue;
+                    }
+                    let delete = CancellationToken::new();
+                    if deleting {
+                        delete.cancel();
+                    }
+                    running.insert(id.clone(), delete.clone());
+                    let storage = storage.clone();
+                    let core = &core;
+                    let changed = &changed;
+                    let slots = &slots;
+                    jobs.push(async move {
+                        let result = core
+                            .run_source(&id, storage.as_ref(), &delete, slots, changed)
+                            .await;
+                        (id, result)
+                    });
+                }
+            }
+            Err(error) => {
+                log::error!("Engine operation failed: {error:#}");
+                state.write().message = crate::redact(&format!("{error:#}"));
+            }
+        }
+        changed();
+        state.write().busy = !running.is_empty();
+    }
+    log::info!("Sync worker stopped");
+}
+
 pub fn data_directory() -> Result<PathBuf> {
     Ok(directories::BaseDirs::new()
         .context("Find application support directory")?
@@ -595,6 +753,8 @@ pub fn data_directory() -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    mod deletion;
+
     use super::*;
     use crate::storage::StorageConfig;
     use std::{
@@ -630,6 +790,20 @@ mod tests {
 
     impl MockStorage {
         fn new(reject_covers: bool) -> Self {
+            Self::with_handler(move |request| {
+                assert!(request.headers.starts_with("PUT "));
+                let status = if reject_covers && request.path().contains("/cover.") {
+                    "403 Forbidden"
+                } else {
+                    "200 OK"
+                };
+                (status, String::new())
+            })
+        }
+
+        fn with_handler(
+            handler: impl Fn(&Upload) -> (&'static str, String) + Send + 'static,
+        ) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let storage = Storage::new(StorageConfig::S3 {
@@ -672,7 +846,6 @@ mod tests {
                         }
                     };
                     let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
-                    assert!(headers.starts_with("PUT "));
                     let length = headers
                         .lines()
                         .find_map(|line| {
@@ -680,24 +853,19 @@ mod tests {
                             key.eq_ignore_ascii_case("content-length")
                                 .then(|| value.trim().parse::<usize>().unwrap())
                         })
-                        .unwrap();
+                        .unwrap_or(0);
                     while request.len() < header_end + length {
                         let count = socket.read(&mut buffer).unwrap();
                         assert!(count > 0);
                         request.extend_from_slice(&buffer[..count]);
                     }
-                    let reject =
-                        reject_covers && headers.lines().next().unwrap().contains("/cover.");
-                    received.lock().push(Upload {
+                    let request = Upload {
                         headers,
                         body: request[header_end..].to_vec(),
-                    });
-                    let status = if reject { "403 Forbidden" } else { "200 OK" };
-                    write!(
-                        socket,
-                        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    )
-                    .unwrap();
+                    };
+                    let (status, body) = handler(&request);
+                    received.lock().push(request);
+                    write!(socket, "HTTP/1.1 {status}\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
                 }
             });
             Self {

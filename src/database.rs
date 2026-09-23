@@ -3,12 +3,35 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use rusqlite::{Connection, params};
 use serde::Serialize;
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 mod migrations;
 
 #[derive(Clone)]
-pub struct Database(Arc<Mutex<Connection>>);
+pub struct Database(Arc<Connections>);
+
+struct Connections {
+    writer: Mutex<Connection>,
+    readers: Mutex<Vec<Connection>>,
+    path: PathBuf,
+}
+
+fn configure(connection: &Connection) -> Result<()> {
+    // NORMAL + WAL keeps checkpoints consistent; a power loss can replay recent work.
+    connection.execute_batch(
+        "PRAGMA synchronous=NORMAL;
+        PRAGMA foreign_keys=ON;
+        PRAGMA busy_timeout=10000;
+        PRAGMA cache_size=-2000;
+        PRAGMA wal_autocheckpoint=1000;
+        PRAGMA temp_store=MEMORY;
+        PRAGMA mmap_size=0;",
+    )?;
+    Ok(())
+}
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct Source {
     pub id: String,
@@ -35,21 +58,59 @@ pub struct Episode {
     pub public_url: Option<String>,
     pub position: usize,
 }
+impl Source {
+    pub fn deletion_pending(&self) -> bool {
+        matches!(self.phase.as_str(), "deleting" | "delete_error")
+    }
+}
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
-        let mut conn = Connection::open(path)?;
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
-        )?;
+        // Give in-memory test databases a unique name shared by their connections.
+        let path = if path == Path::new(":memory:") {
+            PathBuf::from(format!(
+                "file:mazit-{}?mode=memory&cache=shared",
+                uuid::Uuid::new_v4()
+            ))
+        } else {
+            std::path::absolute(path)?
+        };
+        let mut conn = Connection::open(&path)?;
+        configure(&conn)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         migrations::run(&mut conn)?;
         conn.execute(
-            "UPDATE sources SET phase='idle',next_sync=0 WHERE phase IS NOT 'idle' AND phase IS NOT 'error'",
+            "UPDATE sources SET phase='idle',next_sync=0 WHERE phase NOT IN ('idle','error','deleting','delete_error')",
             [],
         )?;
-        Ok(Self(Arc::new(Mutex::new(conn))))
+        Ok(Self(Arc::new(Connections {
+            writer: Mutex::new(conn),
+            readers: Mutex::new(Vec::new()),
+            path,
+        })))
     }
+
+    fn read<T>(&self, query: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let cached = self.0.readers.lock().pop();
+        let connection = match cached {
+            Some(connection) => connection,
+            None => {
+                let connection = Connection::open(&self.0.path)?;
+                configure(&connection)?;
+                connection.execute_batch("PRAGMA query_only=ON;")?;
+                connection
+            }
+        };
+        // The pool lock is released during queries, independently of the writer mutex.
+        let result = query(&connection);
+        let mut readers = self.0.readers.lock();
+        if readers.len() < 8 {
+            readers.push(connection);
+        }
+        result
+    }
+
     pub fn sources(&self) -> Result<Vec<Source>> {
-        let db = self.0.lock();
+        self.read(|db| {
         let mut query = db.prepare("SELECT s.*,(SELECT count(*) FROM episodes WHERE source IS s.id AND present IS 1),(SELECT count(*) FROM episodes WHERE source IS s.id AND present IS 1 AND state IS 'uploaded') FROM sources s ORDER BY rowid DESC")?;
         Ok(query
             .query_map([], |row| {
@@ -70,6 +131,7 @@ impl Database {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
+        })
     }
     pub fn source(&self, id: &str) -> Result<Source> {
         self.sources()?
@@ -79,11 +141,11 @@ impl Database {
     }
     pub fn add(&self, kind: &str, id: &str, url: &str) -> Result<String> {
         let key = format!("{kind}:{id}");
-        self.0.lock().execute("INSERT INTO sources(id,kind,youtube_id,url,title,folder) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING", params![key,kind,id,url,"New subscription",format!("{kind}-{id}")])?;
+        self.0.writer.lock().execute("INSERT INTO sources(id,kind,youtube_id,url,title,folder) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING", params![key,kind,id,url,"New subscription",format!("{kind}-{id}")])?;
         Ok(key)
     }
     pub fn snapshot(&self, id: &str, snapshot: &Snapshot) -> Result<()> {
-        let mut db = self.0.lock();
+        let mut db = self.0.writer.lock();
         let tx = db.transaction()?;
         tx.execute("UPDATE episodes SET present=0 WHERE source IS ?", [id])?;
         for (position, v) in snapshot.videos.iter().enumerate() {
@@ -97,7 +159,7 @@ impl Database {
         Ok(())
     }
     pub fn episodes(&self, source: &str) -> Result<Vec<Episode>> {
-        let db = self.0.lock();
+        self.read(|db| {
         let mut query = db.prepare("SELECT id,title,description,published,duration,available,position,present,state,bytes,public_url FROM episodes WHERE source IS ? ORDER BY position,id")?;
         Ok(query
             .query_map([source], |row| {
@@ -118,9 +180,10 @@ impl Database {
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)
+        })
     }
     pub fn uploaded(&self, source: &str, video: &Video, bytes: u64, url: &str) -> Result<()> {
-        self.0.lock().execute("UPDATE episodes SET state='uploaded',title=?,description=?,published=coalesce(?,published),duration=?,bytes=?,public_url=? WHERE source IS ? AND id IS ?", params![video.title,video.description,video.published,video.duration,bytes as i64,url,source,video.id])?;
+        self.0.writer.lock().execute("UPDATE episodes SET state='uploaded',title=?,description=?,published=coalesce(?,published),duration=?,bytes=?,public_url=? WHERE source IS ? AND id IS ?", params![video.title,video.description,video.published,video.duration,bytes as i64,url,source,video.id])?;
         Ok(())
     }
     pub fn pending_episodes(&self, source: &str) -> Result<Vec<Episode>> {
@@ -133,28 +196,36 @@ impl Database {
             .collect())
     }
     pub fn forget(&self, source: &str, video: &str) -> Result<()> {
-        self.0.lock().execute(
+        self.0.writer.lock().execute(
             "DELETE FROM episodes WHERE source IS ? AND id IS ? AND present IS 0",
             params![source, video],
         )?;
         Ok(())
     }
+    pub fn delete_source(&self, id: &str) -> Result<()> {
+        let mut db = self.0.writer.lock();
+        let tx = db.transaction()?;
+        tx.execute("DELETE FROM episodes WHERE source IS ?", [id])?;
+        tx.execute("DELETE FROM sources WHERE id IS ?", [id])?;
+        tx.commit()?;
+        Ok(())
+    }
     pub fn phase(&self, id: &str, phase: &str, error: Option<&str>) -> Result<()> {
-        self.0.lock().execute(
+        self.0.writer.lock().execute(
             "UPDATE sources SET phase=?,error=? WHERE id IS ?",
             params![phase, error, id],
         )?;
         Ok(())
     }
     pub fn published(&self, id: &str, url: &str) -> Result<()> {
-        self.0.lock().execute(
+        self.0.writer.lock().execute(
             "UPDATE sources SET feed_url=?,next_sync=? WHERE id IS ?",
             params![url, chrono::Utc::now().timestamp() + 3600, id],
         )?;
         Ok(())
     }
     pub fn postpone(&self, id: &str) -> Result<()> {
-        self.0.lock().execute(
+        self.0.writer.lock().execute(
             "UPDATE sources SET next_sync=? WHERE id IS ?",
             params![chrono::Utc::now().timestamp() + 300, id],
         )?;
@@ -165,6 +236,88 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wal_readers_do_not_wait_for_the_writer_and_use_consistent_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&directory.path().join("concurrent.sqlite")).unwrap();
+        let id = db
+            .add("playlist", "test", "https://www.youtube.com")
+            .unwrap();
+        let mut writer = db.0.writer.lock();
+        let tx = writer.transaction().unwrap();
+        tx.execute(
+            "UPDATE sources SET title='Uncommitted' WHERE id IS ?",
+            [&id],
+        )
+        .unwrap();
+        // These queries must finish before the writer's transaction or mutex is released.
+        std::thread::scope(|scope| {
+            let readers: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        assert_eq!(db.source(&id).unwrap().title, "New subscription");
+                    })
+                })
+                .collect();
+            for reader in readers {
+                reader.join().unwrap();
+            }
+        });
+        tx.commit().unwrap();
+        assert_eq!(db.source(&id).unwrap().title, "Uncommitted");
+        db.read(|reader| {
+            for connection in [&*writer, reader] {
+                for (pragma, expected) in [
+                    ("synchronous", 1),
+                    ("foreign_keys", 1),
+                    ("busy_timeout", 10000),
+                    ("cache_size", -2000),
+                    ("wal_autocheckpoint", 1000),
+                    ("temp_store", 2),
+                    ("mmap_size", 0),
+                ] {
+                    let actual: i64 =
+                        connection.pragma_query_value(None, pragma, |row| row.get(0))?;
+                    assert_eq!(actual, expected, "{pragma}");
+                }
+                let mode: String =
+                    connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+                assert_eq!(mode, "wal");
+            }
+            assert!(reader.execute("DELETE FROM sources", []).is_err());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn deletion_is_transactional_and_pending_deletions_survive_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("delete.sqlite");
+        let db = Database::open(&path).unwrap();
+        let deleted = db
+            .add("playlist", "deleted", "https://www.youtube.com")
+            .unwrap();
+        let retained = db
+            .add("playlist", "retained", "https://www.youtube.com")
+            .unwrap();
+        for id in [&deleted, &retained] {
+            db.snapshot(id, &snapshot()).unwrap();
+        }
+        db.phase(&deleted, "deleting", None).unwrap();
+        db.phase(&retained, "delete_error", Some("Retry deletion"))
+            .unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.source(&deleted).unwrap().phase, "deleting");
+        assert_eq!(db.source(&retained).unwrap().phase, "delete_error");
+        db.delete_source(&deleted).unwrap();
+        db.delete_source(&deleted).unwrap();
+        assert!(db.source(&deleted).is_err());
+        assert!(db.episodes(&deleted).unwrap().is_empty());
+        assert_eq!(db.episodes(&retained).unwrap().len(), 8);
+    }
 
     fn snapshot() -> Snapshot {
         Snapshot {
@@ -370,7 +523,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(feed.matches("<item>").count(), 8);
-        let connection = db.0.lock();
+        let connection = db.0.writer.lock();
         let has_settings: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IS 'settings')",

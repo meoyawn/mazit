@@ -4,6 +4,12 @@ Mazit is a macOS desktop app that syncs YouTube content to your own S3-compatibl
 
 Select **Copy RSS URL** in Mazit and add the feed to Apple Podcasts, Pocket Casts, or another podcast app. Your podcast player streams episodes from your public storage URL while Mazit keeps the feed up to date. Storage must provide direct public URLs for feeds, audio, and cover images. S3 settings and credentials live in `~/.config/mazit/config.toml`.
 
+The trash button deletes a podcast, including its local audio and artwork, S3 folder, and SQLite checkpoints. It stops that podcast's sync immediately and waits for requests already sent to S3 before removing remote files. Failed deletions stay paused with an error; click the trash button again to retry. An interrupted deletion resumes when Mazit restarts.
+
+Storage credentials need permission to list and delete objects and to list and abort unfinished multipart uploads in the configured bucket.
+
+SQLite uses WAL with concurrent read connections and one mutex-protected writer. Connections use `synchronous=NORMAL`, foreign keys, a 10-second busy timeout, a 2 MB cache, a 1,000-page automatic checkpoint, in-memory temporary storage, and disabled memory mapping. A power loss can lose recent checkpoint commits; the next sync repeats that work. See [SQLite's synchronous documentation](https://sqlite.org/pragma.html#pragma_synchronous).
+
 Playlist and channel feeds use newest-first episodic ordering, without seasons or episode numbers. Sync diffs flat playlist pages and extracts their date labels without per-video lookups. Relative labels provide approximate dates, cached so they do not drift on refresh; exact dates already saved or returned during audio downloads take precedence. Videos with the same approximate date may appear tied in podcast apps. Client choices and experiments are recorded in the [Innertube experiment log](innertube.md).
 
 The library shows each subscription once, with its cover, a link to the original YouTube source, sync status, and a compact RSS field with a copy button. Cover images are cached locally so they remain visible after restarting Mazit.

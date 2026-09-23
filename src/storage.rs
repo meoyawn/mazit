@@ -7,9 +7,10 @@ use aws_sdk_s3::{
     },
     error::{ProvideErrorMetadata, SdkError},
     primitives::{ByteStream, Length},
-    types::{CompletedMultipartUpload, CompletedPart},
+    types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier},
 };
 use std::{path::Path, time::Duration};
+use tokio_util::sync::CancellationToken;
 
 const PART_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_PARTS: u64 = 10_000;
@@ -58,6 +59,7 @@ pub struct Storage {
     client: Client,
     bucket: String,
     config: StorageConfig,
+    write_cancelled: CancellationToken,
 }
 impl Storage {
     pub fn new(config: StorageConfig) -> Result<Self> {
@@ -107,7 +109,22 @@ impl Storage {
             client,
             bucket: bucket.clone(),
             config,
+            write_cancelled: CancellationToken::new(),
         })
+    }
+    pub(crate) fn with_write_cancellation(&self, cancelled: CancellationToken) -> Self {
+        Self {
+            write_cancelled: cancelled,
+            ..self.clone()
+        }
+    }
+
+    fn check_writes(&self) -> Result<()> {
+        ensure!(
+            !self.write_cancelled.is_cancelled(),
+            "Podcast upload cancelled"
+        );
+        Ok(())
     }
     pub fn url(&self, key: &str) -> Result<String> {
         validate_key(key, false)?;
@@ -139,14 +156,18 @@ impl Storage {
         })
     }
     pub async fn put_file(&self, key: &str, file: &Path) -> Result<()> {
+        self.check_writes()?;
         let key = self.object_key(key)?;
         let size = tokio::fs::metadata(file).await?.len();
+        self.check_writes()?;
         if size <= PART_SIZE {
+            let body = ByteStream::from_path(file).await?;
+            self.check_writes()?;
             self.client
                 .put_object()
                 .bucket(&self.bucket)
                 .key(key)
-                .body(ByteStream::from_path(file).await?)
+                .body(body)
                 .content_type("audio/mp4")
                 .cache_control("public, max-age=3600")
                 .send()
@@ -175,6 +196,7 @@ impl Storage {
         let result = async {
             let mut parts = Vec::new();
             for index in 0..size.div_ceil(part_size) {
+                self.check_writes()?;
                 let offset = index * part_size;
                 let body = ByteStream::read_from()
                     .path(file)
@@ -182,6 +204,7 @@ impl Storage {
                     .length(Length::Exact((size - offset).min(part_size)))
                     .build()
                     .await?;
+                self.check_writes()?;
                 let part_number = (index + 1) as i32;
                 let part = self
                     .client
@@ -204,6 +227,7 @@ impl Storage {
                         .build(),
                 );
             }
+            self.check_writes()?;
             self.client
                 .complete_multipart_upload()
                 .bucket(&self.bucket)
@@ -236,6 +260,7 @@ impl Storage {
         self.put_bytes(key, text.into_bytes(), mime).await
     }
     pub async fn put_bytes(&self, key: &str, bytes: Vec<u8>, mime: &str) -> Result<()> {
+        self.check_writes()?;
         self.client
             .put_object()
             .bucket(&self.bucket)
@@ -256,6 +281,115 @@ impl Storage {
             .send()
             .await
             .map_err(|error| storage_error("delete", error))?;
+        Ok(())
+    }
+    pub async fn delete_folder(&self, folder: &str) -> Result<()> {
+        // The trailing slash prevents a source from matching a similarly named podcast.
+        let prefix = format!("{}/", self.object_key(folder)?);
+        let mut key_marker = None;
+        let mut upload_marker = None;
+        loop {
+            let page = self
+                .client
+                .list_multipart_uploads()
+                .bucket(&self.bucket)
+                .prefix(&prefix)
+                .set_key_marker(key_marker.clone())
+                .set_upload_id_marker(upload_marker.clone())
+                .send()
+                .await
+                .map_err(|error| storage_error("list unfinished uploads", error))?;
+            for upload in page.uploads() {
+                let key = upload.key().context("S3 upload is missing its key")?;
+                ensure!(
+                    key.starts_with(&prefix),
+                    "S3 returned an upload outside the podcast folder"
+                );
+                let result = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(&self.bucket)
+                    .key(key)
+                    .upload_id(upload.upload_id().context("S3 upload is missing its ID")?)
+                    .send()
+                    .await;
+                if let Err(error) = result {
+                    // A cancelled completion request may already have finished on S3.
+                    if error.as_service_error().and_then(|error| error.code())
+                        != Some("NoSuchUpload")
+                    {
+                        return Err(storage_error("abort unfinished upload", error));
+                    }
+                }
+            }
+            if page.is_truncated() != Some(true) {
+                break;
+            }
+            let next_key = page
+                .next_key_marker()
+                .context("S3 did not return an upload page marker")?
+                .to_owned();
+            let next_upload = page.next_upload_id_marker().map(str::to_owned);
+            ensure!(
+                key_marker.as_ref() != Some(&next_key) || upload_marker != next_upload,
+                "S3 repeated an upload page marker"
+            );
+            key_marker = Some(next_key);
+            upload_marker = next_upload;
+        }
+        let mut continuation = None;
+        loop {
+            let page = self
+                .client
+                .list_objects_v2()
+                .bucket(&self.bucket)
+                .prefix(&prefix)
+                .set_continuation_token(continuation.clone())
+                .send()
+                .await
+                .map_err(|error| storage_error("list podcast files", error))?;
+            let mut objects = Vec::new();
+            for object in page.contents() {
+                let key = object.key().context("S3 object is missing its key")?;
+                ensure!(
+                    key.starts_with(&prefix),
+                    "S3 returned a file outside the podcast folder"
+                );
+                objects.push(ObjectIdentifier::builder().key(key).build()?);
+            }
+            if !objects.is_empty() {
+                let result = self
+                    .client
+                    .delete_objects()
+                    .bucket(&self.bucket)
+                    .delete(
+                        Delete::builder()
+                            .set_objects(Some(objects))
+                            .quiet(true)
+                            .build()?,
+                    )
+                    .send()
+                    .await
+                    .map_err(|error| storage_error("delete podcast files", error))?;
+                ensure!(
+                    result.errors().is_empty(),
+                    "S3 could not delete {} podcast file(s); retry deletion",
+                    result.errors().len()
+                );
+            }
+            if page.is_truncated() != Some(true) {
+                break;
+            }
+            let next = page
+                .next_continuation_token()
+                .context("S3 did not return a file page marker")?
+                .to_owned();
+            ensure!(
+                continuation.as_ref() != Some(&next),
+                "S3 repeated a file page marker"
+            );
+            continuation = Some(next);
+        }
         Ok(())
     }
     pub async fn verify(&self) -> Result<()> {

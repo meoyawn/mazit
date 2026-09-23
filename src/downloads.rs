@@ -221,6 +221,15 @@ impl Default for DownloadManager {
 }
 
 impl DownloadManager {
+    pub fn remove_source(&self, source_id: &str) {
+        self.state
+            .write()
+            .snapshot
+            .items
+            .retain(|item| item.source_id != source_id);
+        self.changed.send_replace(());
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         self.state.read().snapshot.clone()
     }

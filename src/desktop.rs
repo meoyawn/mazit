@@ -330,6 +330,7 @@ impl Render for MazitView {
             }
             for source in &state.sources {
                 let id = source.id.clone();
+                let delete_id = id.clone();
                 let element_id = ElementId::from(SharedString::from(id.clone()));
                 let cover = cover_artwork(
                     self.cover_images
@@ -341,6 +342,8 @@ impl Render for MazitView {
                     "idle" if source.feed_url.is_some() => ("Up to date", 0x36826c),
                     "idle" => ("Waiting to sync", 0x7d8597),
                     "error" => ("Needs attention", 0xb64c48),
+                    "deleting" => ("Deleting…", 0x7d8597),
+                    "delete_error" => ("Deletion failed", 0xb64c48),
                     "scanning" => ("Scanning", 0x526bbe),
                     "downloading" => ("Downloading", 0x526bbe),
                     "publishing" => ("Publishing", 0x526bbe),
@@ -381,9 +384,27 @@ impl Render for MazitView {
                                     .ghost()
                                     .small()
                                     .tooltip("Refresh subscription")
-                                    .disabled(state.busy)
+                                    .disabled(state.busy || source.deletion_pending())
                                     .on_click(cx.listener(move |this, _, _, _| {
                                         this.engine.command(Command::Refresh(Some(id.clone())))
+                                    })),
+                            )
+                            .child(
+                                Button::new((element_id.clone(), "delete"))
+                                    .debug_selector(|| format!("{}:delete", source.id))
+                                    .icon(UiIcon::default().path("icons/trash.svg"))
+                                    .ghost()
+                                    .small()
+                                    .text_color(rgb(0xb64c48))
+                                    .tooltip(if source.phase == "delete_error" {
+                                        "Retry deleting podcast and all local and S3 files"
+                                    } else {
+                                        "Delete podcast and all local and S3 files"
+                                    })
+                                    .disabled(source.phase == "deleting")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.engine.command(Command::Delete(delete_id.clone()));
+                                        cx.notify();
                                     })),
                             ),
                     )
@@ -545,13 +566,20 @@ impl AssetSource for Assets {
                 "../assets/refresh.svg"
             ))));
         }
+        if path == "icons/trash.svg" {
+            return Ok(Some(std::borrow::Cow::Borrowed(include_bytes!(
+                "../assets/trash.svg"
+            ))));
+        }
         gpui_component_assets::Assets.load(path)
     }
 
     fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
         let mut assets = gpui_component_assets::Assets.list(path)?;
-        if "icons/refresh.svg".starts_with(path) {
-            assets.push("icons/refresh.svg".into());
+        for icon in ["icons/refresh.svg", "icons/trash.svg"] {
+            if icon.starts_with(path) {
+                assets.push(icon.into());
+            }
         }
         Ok(assets)
     }

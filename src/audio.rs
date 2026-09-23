@@ -11,6 +11,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::Path,
 };
+use tokio_util::sync::CancellationToken;
 
 pub fn version() -> String {
     unsafe {
@@ -20,13 +21,14 @@ pub fn version() -> String {
     }
 }
 
-pub fn prepare_m4a(input: &Path, output: &Path) -> Result<u64> {
+pub fn prepare_m4a(input: &Path, output: &Path, cancelled: &CancellationToken) -> Result<u64> {
+    ensure!(!cancelled.is_cancelled(), "Audio conversion cancelled");
     ensure!(
         input != output && !output.exists(),
         "Audio output must be a new file"
     );
     ffmpeg::init()?;
-    let result = convert(input, output).and_then(|()| {
+    let result = convert(input, output, cancelled).and_then(|()| {
         ensure!(fast_start(output)?, "M4A fast-start validation failed");
         Ok(output.metadata()?.len())
     });
@@ -35,7 +37,7 @@ pub fn prepare_m4a(input: &Path, output: &Path) -> Result<u64> {
     }
     result
 }
-fn convert(input: &Path, output: &Path) -> Result<()> {
+fn convert(input: &Path, output: &Path, cancelled: &CancellationToken) -> Result<()> {
     let mut input = format::input(input)?;
     ensure!(
         input
@@ -56,7 +58,7 @@ fn convert(input: &Path, output: &Path) -> Result<()> {
         let decoder = codec::Context::from_parameters(parameters)?
             .decoder()
             .audio()?;
-        return transcode(input, output, index, decoder);
+        return transcode(input, output, index, decoder, cancelled);
     }
     log::info!("Remuxing AAC to fast-start M4A without re-encoding");
     {
@@ -72,6 +74,7 @@ fn convert(input: &Path, output: &Path) -> Result<()> {
     let destination_time = output.stream(0).context("No output stream")?.time_base();
     let mut count = 0;
     loop {
+        ensure!(!cancelled.is_cancelled(), "Audio conversion cancelled");
         let mut packet = Packet::empty();
         match packet.read(&mut input) {
             Ok(()) => (),
@@ -182,6 +185,7 @@ fn transcode(
     mut output: format::context::Output,
     index: usize,
     decoder: codec::decoder::Audio,
+    cancelled: &CancellationToken,
 ) -> Result<()> {
     ensure!(
         decoder.rate() > 0 && decoder.ch_layout().channels() > 0,
@@ -234,6 +238,7 @@ fn transcode(
         fifo: vec![VecDeque::new(); layout.bits().count_ones() as usize],
     };
     loop {
+        ensure!(!cancelled.is_cancelled(), "Audio conversion cancelled");
         let mut packet = Packet::empty();
         match packet.read(&mut input) {
             Ok(()) => (),
@@ -248,6 +253,7 @@ fn transcode(
     state.decoder.send_eof()?;
     state.drain_decoder()?;
     loop {
+        ensure!(!cancelled.is_cancelled(), "Audio conversion cancelled");
         let capacity = state
             .resampler
             .delay()
