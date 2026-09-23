@@ -1,5 +1,6 @@
 use crate::storage::StorageConfig;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
 use std::{
     fs,
@@ -132,6 +133,59 @@ fn write_new(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn bind_storage(directory: &Path, identity: &str, has_sources: bool) -> Result<()> {
+    let path = directory.join("storage-binding");
+    let existing = read_text(&path)?;
+    ensure!(
+        !has_sources || existing.as_deref() == Some(identity),
+        "Existing feeds are tied to their storage location; restore the library's storage binding or move its feeds explicitly"
+    );
+    if existing.as_deref() != Some(identity) {
+        use std::io::Write;
+        fs::create_dir_all(directory)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
+        temporary.write_all(identity.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).context("Save storage binding")?;
+    }
+    Ok(())
+}
+
+pub fn export_legacy_storage_binding(directory: &Path) -> Result<()> {
+    let database = directory.join("mazit.sqlite");
+    if !database.exists() {
+        return Ok(());
+    }
+    let connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    let has_settings: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type IS 'table' AND name IS 'settings')",
+        [],
+        |row| row.get(0),
+    )?;
+    if has_settings {
+        let identity: Option<String> = connection
+            .query_row(
+                "SELECT value FROM settings WHERE key IS 'storage'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(identity) = identity {
+            let path = directory.join("storage-binding");
+            if let Some(existing) = read_text(&path)? {
+                ensure!(
+                    existing == identity,
+                    "Storage binding conflicts with the library checkpoint"
+                );
+            } else {
+                // Persist the binding before V2 removes its old SQL table, including across crashes.
+                write_new(&path, &identity)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "desktop")]
 pub fn open_in_editor() -> Result<()> {
     let path = path()?;
@@ -144,6 +198,45 @@ mod tests {
     use super::*;
 
     const EXAMPLE: &str = "[s3]\nendpoint = 'https://account.r2.cloudflarestorage.com'\nregion = 'auto'\nbucket = 'podcasts'\npublic_base_url = 'https://audio.example.com'\naccess_key_id = 'id'\nsecret_access_key = 'secret'\n";
+
+    #[test]
+    fn storage_binding_is_a_file_and_cannot_repoint_existing_checkpoints() {
+        let directory = tempfile::tempdir().unwrap();
+        bind_storage(directory.path(), "first-location", false).unwrap();
+        bind_storage(directory.path(), "first-location", true).unwrap();
+        assert!(bind_storage(directory.path(), "other-location", true).is_err());
+        assert_eq!(
+            fs::read_to_string(directory.path().join("storage-binding")).unwrap(),
+            "first-location"
+        );
+        bind_storage(directory.path(), "other-location", false).unwrap();
+        assert!(bind_storage(directory.path(), "other-location", true).is_ok());
+    }
+
+    #[test]
+    fn legacy_binding_is_exported_before_settings_are_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("mazit.sqlite");
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .execute_batch(include_str!("../migrations/V1__initial.sql"))
+            .unwrap();
+        connection.execute_batch("PRAGMA user_version=1; INSERT INTO settings VALUES('storage','original-location');").unwrap();
+        export_legacy_storage_binding(directory.path()).unwrap();
+        // Repeating the export after a crash is harmless.
+        export_legacy_storage_binding(directory.path()).unwrap();
+        drop(crate::database::Database::open(&database).unwrap());
+        export_legacy_storage_binding(directory.path()).unwrap();
+        bind_storage(directory.path(), "original-location", true).unwrap();
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IS 'settings')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!exists);
+    }
 
     #[test]
     fn parses_s3_with_optional_empty_root() {

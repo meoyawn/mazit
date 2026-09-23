@@ -15,6 +15,8 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+mod dates;
+
 #[derive(Clone)]
 pub struct YouTube {
     sender: mpsc::Sender<Request>,
@@ -36,6 +38,25 @@ pub struct Video {
     pub duration: f64,
     pub available: bool,
 }
+
+#[derive(Deserialize)]
+struct ListingVideo {
+    #[serde(flatten)]
+    video: Video,
+    published_text: Option<String>,
+}
+
+pub fn parse_publication_date(date: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(date)
+        .ok()
+        .map(|date| date.to_utc())
+        .or_else(|| {
+            chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .ok()?
+                .and_hms_opt(0, 0, 0)
+                .map(|date| date.and_utc())
+        })
+}
 #[derive(Deserialize)]
 pub struct MediaRequest {
     pub url: String,
@@ -54,6 +75,20 @@ pub struct Snapshot {
 }
 
 impl YouTube {
+    #[cfg(test)]
+    pub(crate) fn with_responses(responses: Vec<(&'static str, Value, Value)>) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<Request>(32);
+        tokio::spawn(async move {
+            for (method, args, value) in responses {
+                let request = receiver.recv().await.unwrap();
+                assert_eq!(request.method, method);
+                assert_eq!(request.args, args);
+                request.result.send(Ok(value)).unwrap();
+            }
+        });
+        Self { sender }
+    }
+
     pub fn start(client: Client, cookie_header: Arc<dyn Fn() -> String + Send + Sync>) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Request>(32);
         std::thread::Builder::new().name("youtube-quickjs".into()).spawn(move || {
@@ -162,6 +197,8 @@ impl YouTube {
     }
 
     pub async fn snapshot(&self, kind: &str, id: &str) -> Result<Snapshot> {
+        // Use one reference time for all continuation pages in this scan.
+        let observed_at = chrono::Utc::now();
         let playlist = if kind == "channel" {
             format!("UU{}", &id[2..])
         } else {
@@ -195,10 +232,10 @@ impl YouTube {
                     .and_then(|text| text.split_whitespace().next())
                     .and_then(|text| text.replace(',', "").parse::<usize>().ok());
             }
-            let entries: Vec<Video> = serde_json::from_value(page["videos"].clone())?;
+            let entries: Vec<ListingVideo> = serde_json::from_value(page["videos"].clone())?;
             let fingerprint = entries
                 .iter()
-                .map(|v| v.id.as_str())
+                .map(|v| v.video.id.as_str())
                 .collect::<Vec<_>>()
                 .join(",");
             ensure!(
@@ -206,7 +243,16 @@ impl YouTube {
                 "Repeated YouTube pagination; no files removed"
             );
             count += entries.len();
-            for video in entries {
+            for entry in entries {
+                let mut video = entry.video;
+                video.published = video
+                    .published
+                    .as_deref()
+                    .and_then(parse_publication_date)
+                    .or_else(|| {
+                        dates::parse_listing_date(entry.published_text.as_deref()?, observed_at)
+                    })
+                    .map(|date| date.to_rfc3339());
                 ensure!(
                     video.id.len() == 11 && valid_id(&video.id),
                     "Invalid video identifier"
@@ -237,10 +283,16 @@ impl YouTube {
         })
     }
     pub async fn media(&self, id: &str) -> Result<MediaRequest> {
-        Ok(serde_json::from_value(
+        let mut media: MediaRequest = serde_json::from_value(
             self.call("media", json!({"id": id, "client": "VISIONOS"}))
                 .await?,
-        )?)
+        )?;
+        media.published = media
+            .published
+            .as_deref()
+            .and_then(parse_publication_date)
+            .map(|date| date.to_rfc3339());
+        Ok(media)
     }
 }
 
@@ -329,22 +381,9 @@ async fn fetch_metadata(client: Client, json: String) -> Result<Value> {
 mod tests {
     use super::*;
 
-    fn responses(responses: Vec<(&'static str, Value, Value)>) -> YouTube {
-        let (sender, mut receiver) = mpsc::channel::<Request>(32);
-        tokio::spawn(async move {
-            for (method, args, value) in responses {
-                let request = receiver.recv().await.unwrap();
-                assert_eq!(request.method, method);
-                assert_eq!(request.args, args);
-                request.result.send(Ok(value)).unwrap();
-            }
-        });
-        YouTube { sender }
-    }
-
     #[tokio::test]
     async fn playlist_cover_survives_continuation_pages() {
-        let youtube = responses(vec![
+        let youtube = YouTube::with_responses(vec![
             (
                 "page",
                 json!({"id": "PLtest", "continuation": false}),
@@ -375,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn channel_cover_replaces_uploads_playlist_cover() {
         for cover_url in [Some("https://yt3.googleusercontent.com/avatar"), None] {
-            let youtube = responses(vec![
+            let youtube = YouTube::with_responses(vec![
                 (
                     "page",
                     json!({"id": "UUtest", "continuation": false}),
@@ -396,6 +435,88 @@ mod tests {
             assert_eq!(snapshot.title, "Channel");
             assert_eq!(snapshot.cover_url.as_deref(), cover_url);
         }
+    }
+
+    #[tokio::test]
+    async fn three_thousand_videos_need_only_flat_pages_for_diffing() {
+        // Only page responses are supplied: any per-video call fails this scan.
+        for kind in ["playlist", "channel"] {
+            let id = if kind == "playlist" {
+                "PLtest"
+            } else {
+                "UCtest"
+            };
+            let playlist = if kind == "playlist" {
+                "PLtest"
+            } else {
+                "UUtest"
+            };
+            let mut responses = (0..30)
+                .map(|page| {
+                    (
+                        "page",
+                        json!({"id": playlist, "continuation": page != 0}),
+                        json!({
+                            "title": "Large playlist", "count": "3,000 videos",
+                            "continuation": page < 29,
+                            "videos": (page * 100..(page + 1) * 100).map(|index| json!({
+                                "id": format!("{index:011}"), "title": "Video", "duration": 0,
+                                "available": true, "published_text": "15y ago"
+                            })).collect::<Vec<_>>()
+                        }),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if kind == "channel" {
+                responses.push(("channel", json!({"id": id}), json!({"title": "Channel"})));
+            }
+            let youtube = YouTube::with_responses(responses);
+            let snapshot = youtube.snapshot(kind, id).await.unwrap();
+            assert_eq!(snapshot.videos.len(), 3000);
+            let first = snapshot.videos[0].published.as_deref().unwrap();
+            assert!(parse_publication_date(first).is_some());
+            for (index, video) in snapshot.videos.iter().enumerate() {
+                assert_eq!(video.id, format!("{index:011}"));
+                assert_eq!(video.published.as_deref(), Some(first));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_listing_dates_do_not_trigger_video_lookups() {
+        let youtube = YouTube::with_responses(vec![(
+            "page",
+            json!({"id": "PLtest", "continuation": false}),
+            json!({
+                "count": "2 videos", "videos": [
+                    {"id": "abcdefghijk", "title": "First", "duration": 0, "available": true},
+                    {"id": "lmnopqrstuv", "title": "Second", "duration": 0, "available": true, "published_text": "50K views"}
+                ]
+            }),
+        )]);
+        let snapshot = youtube.snapshot("playlist", "PLtest").await.unwrap();
+        assert!(
+            snapshot
+                .videos
+                .iter()
+                .all(|video| video.published.is_none())
+        );
+    }
+
+    #[tokio::test]
+    async fn audio_resolution_keeps_visionos_and_does_not_require_web_metadata() {
+        let youtube = YouTube::with_responses(vec![(
+            "media",
+            json!({"id": "FAaMG_3Lwug", "client": "VISIONOS"}),
+            json!({
+                "url": "https://example.googlevideo.com/audio", "bytes": 12,
+                "user_agent": "VISIONOS", "title": "Showdown", "description": "",
+                "duration": 300, "published": null
+            }),
+        )]);
+        let media = youtube.media("FAaMG_3Lwug").await.unwrap();
+        assert!(media.published.is_none());
+        assert_eq!(media.user_agent, "VISIONOS");
     }
 
     #[tokio::test]

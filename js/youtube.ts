@@ -6,6 +6,7 @@ import {
   Log,
   Constants,
 } from "youtubei.js";
+import { playlistEntry } from "./youtube-listing.ts";
 
 declare function hostFetch(request: string): Promise<string>;
 declare function hostCookie(): string;
@@ -111,26 +112,9 @@ async function operation(method: string, json: string): Promise<string> {
         : await yt.getPlaylist(args.id);
     if (page.has_continuation) pages.set(args.id, page);
     else pages.delete(args.id);
-    const videos = page.items.map((item) => {
-      if (item.is(YTNodes.PlaylistVideo))
-        return {
-          id: item.id,
-          title: item.title.toString(),
-          duration: item.duration.seconds || 0,
-          available: item.is_playable && !item.is_live && !item.is_upcoming,
-        };
-      if (
-        item.is(YTNodes.LockupView) &&
-        ["VIDEO", "SHORT"].includes(item.content_type)
-      )
-        return {
-          id: item.content_id,
-          title: item.metadata?.title.toString() || item.content_id,
-          duration: 0,
-          available: true,
-        };
-      throw new Error("Unsupported playlist item; listing is incomplete.");
-    });
+    // args.id is a playlist ID (including a channel's UU uploads playlist).
+    // WEB listing pages already contain date labels; no per-video player lookups.
+    const videos = page.items.map(playlistEntry);
     return JSON.stringify({
       title: page.info.title,
       description: page.info.description || "",
@@ -153,6 +137,7 @@ async function operation(method: string, json: string): Promise<string> {
     });
   }
   if (method === "media") {
+    // args.id is a video ID. Only an audio download may request per-video info.
     const info = await yt.getBasicInfo(args.id, { client: args.client });
     if (info.playability_status?.status !== "OK")
       throw new Error(

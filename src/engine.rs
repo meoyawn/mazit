@@ -69,6 +69,7 @@ impl Core {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
+        config::export_legacy_storage_binding(&directory)?;
         let db = Database::open(&directory.join("mazit.sqlite"))?;
         let covers = RwLock::new(load_covers(&directory, &db.sources()?));
         let (client, jar) = crate::network::client(cookies)?;
@@ -90,6 +91,9 @@ impl Core {
         let (kind, id, url) = self.youtube.resolve(url).await?;
         log::info!("Adding subscription {kind}:{id}");
         self.db.add(&kind, &id, &url)
+    }
+    pub fn bind_storage(&self, identity: &str) -> Result<()> {
+        config::bind_storage(&self.directory, identity, !self.db.sources()?.is_empty())
     }
     pub async fn sync(
         &self,
@@ -156,12 +160,7 @@ impl Core {
             self.covers.write().remove(id);
         }
         changed();
-        let pending: Vec<_> = self
-            .db
-            .episodes(id)?
-            .into_iter()
-            .filter(|e| e.present && e.video.available && e.state != "uploaded")
-            .collect();
+        let pending = self.db.pending_episodes(id)?;
         log::info!("Transferring source={id} pending={}", pending.len());
         let source_ref = &source;
         let outcomes = stream::iter(pending)
@@ -314,7 +313,7 @@ async fn publish(
     };
     let key = format!("{}/rss.xml", source.folder);
     let feed_url = storage.url(&key)?;
-    let feed = crate::rss::render(source, episodes, &feed_url, cover_url.as_deref());
+    let feed = crate::rss::render(source, episodes, &feed_url, cover_url.as_deref())?;
     // Use the generic XML MIME type so browsers display the feed in their XML viewer.
     retry(&format!("Publish RSS source={}", source.id), || {
         storage.put_text(&key, feed.clone(), "application/xml; charset=utf-8")
@@ -379,7 +378,7 @@ impl Engine {
             let loaded = (|| -> Result<Storage> {
                 let settings = config::parse(text)?;
                 let candidate = Storage::new(settings.clone())?;
-                core.db.bind_storage(&settings.identity())?;
+                core.bind_storage(&settings.identity())?;
                 Ok(candidate)
             })();
             match loaded {
@@ -436,7 +435,7 @@ impl Engine {
                         Some(Command::ReloadConfig) => {
                             let settings = config::load(&config_path)?;
                             let candidate = Storage::new(settings.clone())?;
-                            core.db.bind_storage(&settings.identity())?;
+                            core.bind_storage(&settings.identity())?;
                             candidate.verify().await?;
                             log::info!("Storage configuration reloaded and verified");
                             storage = Some(candidate);
@@ -649,6 +648,32 @@ mod tests {
         )
         .unwrap();
         db.source(&id).unwrap()
+    }
+
+    #[tokio::test]
+    async fn missing_date_never_overwrites_the_published_feed() {
+        let mock = MockStorage::new(false);
+        let episode = Episode {
+            video: crate::youtube::Video {
+                id: "FAaMG_3Lwug".into(),
+                title: "Showdown".into(),
+                description: String::new(),
+                published: None,
+                duration: 300.0,
+                available: true,
+            },
+            present: true,
+            state: "uploaded".into(),
+            bytes: 123,
+            public_url: Some("https://audio.example.com/existing.m4a".into()),
+            position: 0,
+        };
+        assert!(
+            publish(&source("playlist"), &[episode], &mock.storage, None)
+                .await
+                .is_err()
+        );
+        assert!(mock.uploads.lock().is_empty());
     }
 
     #[tokio::test]

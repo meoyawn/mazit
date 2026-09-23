@@ -1,0 +1,5 @@
+1. **2026-09-23 — Original clients.** WEB handled playlist/channel listings; VISIONOS handled audio. Anonymous throughout. Channel uploads use `UC` → `UU`. VISIONOS responses omitted publication dates.
+
+2. **2026-09-23 — Per-video WEB dates (superseded).** WEB returned exact dates even with `UNPLAYABLE`; VISIONOS still supplied audio. Recovered eight dates for `PL13A9D0E9048D3941`. Worked, but required one extra request per missing date and would scale poorly.
+
+3. **2026-09-24 — Flat sync only (current).** Sync/diffing uses anonymous WEB playlist pages and continuations. Only downloads fetch per-video info, using VISIONOS. Dates come from listing labels, following yt-dlp’s `youtubetab:approximate_date` (reference: `c7fb478`). Use calendar subtraction and nearest-unit rounding; truncation caused a one-day mismatch. Missing dates never trigger per-video lookups. Live results matched yt-dlp; 3,000-video regression used 30 mocked pages. All eight test videos showed “15y ago”, so listing metadata cannot distinguish their exact dates.

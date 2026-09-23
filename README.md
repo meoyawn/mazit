@@ -4,6 +4,8 @@ Mazit is a macOS desktop app that syncs YouTube content to your own S3-compatibl
 
 Select **Copy RSS URL** in Mazit and add the feed to Apple Podcasts, Pocket Casts, or another podcast app. Your podcast player streams episodes from your public storage URL while Mazit keeps the feed up to date. Storage must provide direct public URLs for feeds, audio, and cover images. S3 settings and credentials live in `~/.config/mazit/config.toml`.
 
+Playlist and channel feeds use newest-first episodic ordering, without seasons or episode numbers. Sync diffs flat playlist pages and extracts their date labels without per-video lookups. Relative labels provide approximate dates, cached so they do not drift on refresh; exact dates already saved or returned during audio downloads take precedence. Videos with the same approximate date may appear tied in podcast apps. Client choices and experiments are recorded in the [Innertube experiment log](innertube.md).
+
 The library shows each subscription once, with its cover, a link to the original YouTube source, sync status, and a compact RSS field with a copy button. Cover images are cached locally so they remain visible after restarting Mazit.
 
 [Cloudflare R2 setup and CDN guide](docs/cloudflare-r2.md) — storage credentials, free CDN features, request budgets, byte-range playback, and ETag checks.
@@ -20,6 +22,8 @@ open dist/Mazit.app
 ```
 
 The build prepares FFmpeg and the embedded YouTube.js bridge automatically.
+
+SQLite schema changes live in [`migrations/`](migrations/README.md), with embedded, checksum-verified Refinery migrations run by `src/database/migrations.rs`.
 
 - `task dev` — watch sources, rebuild, and restart the GPUI app. Installs Watchexec if needed. Quit Mazit from the menu bar to stop the dev session.
 - `task run` — prepare dependencies, build debug Rust, and run `target/debug/mazit`. `task dev` calls this task on each restart.
@@ -54,7 +58,9 @@ The schema has one `[s3]` table. All keys except `root` are required strings. `r
 
 Save the file, then select **Reload config** in the desktop app to apply it. A successful reload verifies S3 access and the public URL, refreshes every saved YouTube subscription, and uploads any changes to S3. An existing library cannot switch to another endpoint, region, bucket, root, or public base URL after subscriptions have been added. Use **Refresh all** in the app to synchronize on demand.
 
-The file contains secrets. Mazit creates its config directory with mode `0700` and its template with mode `0600`; it tightens the permissions of an existing config file to `0600` when reading it. Keep the file outside the repository and do not share its contents.
+The file contains secrets. Mazit creates its config directory with mode `0700` and its template with mode `0600`; it tightens the permissions of an existing config file to `0600` when reading it. Keep the file outside the repository and do not share its contents. The library's storage-location binding is a separate private `storage-binding` file, not a database setting.
+
+SQLite holds sync checkpoints: subscribed sources, playlist membership and order, video metadata, completed upload receipts, and feed progress. Each completed upload is committed durably before syncing continues. If the process exits after four of eight uploads, the next launch immediately retries that source and transfers only the remaining four. Audio transfers interrupted before their checkpoint are retried from the beginning. Publishing and cleanup can also be retried after a crash; an unsuccessful sync preserves the previous feed.
 
 ## Privacy
 

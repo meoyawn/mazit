@@ -1,0 +1,4 @@
+CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
+CREATE TABLE sources(id TEXT PRIMARY KEY,kind TEXT NOT NULL,youtube_id TEXT NOT NULL,url TEXT NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',folder TEXT NOT NULL UNIQUE,phase TEXT NOT NULL DEFAULT 'idle',error TEXT,feed_url TEXT,next_sync INTEGER NOT NULL DEFAULT 0) STRICT;
+CREATE TABLE episodes(source TEXT NOT NULL REFERENCES sources(id),id TEXT NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',published TEXT,duration REAL NOT NULL,available INTEGER NOT NULL,position INTEGER NOT NULL,present INTEGER NOT NULL DEFAULT 1,state TEXT NOT NULL,bytes INTEGER NOT NULL DEFAULT 0,public_url TEXT,PRIMARY KEY(source,id)) STRICT;
+CREATE INDEX episodes_presence ON episodes(source,present,state);

@@ -14,7 +14,7 @@ tasks:
     cmd: >-
       sh -c 'MAZIT_DEV_WATCHER_PID=$$ exec watchexec
       --restart --debounce 300ms --stop-timeout 5s
-      --watch src --watch js --watch scripts --watch assets
+      --watch src --watch migrations --watch js --watch scripts --watch assets
       --watch Cargo.toml --watch Cargo.lock --watch Taskfile.yaml
       --watch package.json --watch bun.lock
       --shell none -- sh scripts/dev-run.sh'
@@ -57,9 +57,14 @@ tasks:
       - cargo clippy --workspace --all-targets --features ui-tests -- -D warnings
 
   test:
-    desc: Run Cargo workspace and headless GPUI tests
+    desc: Run JavaScript, Cargo workspace, and headless GPUI tests
     run: once
-    deps: [test:unit, test:ui]
+    deps: [test:js, test:unit, test:ui]
+
+  test:js:
+    desc: Test flat YouTube listing metadata extraction
+    run: once
+    cmd: bun run test
 
   test:unit:
     desc: Run Cargo workspace tests

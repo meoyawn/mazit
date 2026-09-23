@@ -1,9 +1,11 @@
 use crate::youtube::{Snapshot, Video};
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use std::{path::Path, sync::Arc};
+
+mod migrations;
 
 #[derive(Clone)]
 pub struct Database(Arc<Mutex<Connection>>);
@@ -23,6 +25,7 @@ pub struct Source {
     pub total: i64,
     pub uploaded: i64,
 }
+
 #[derive(Clone)]
 pub struct Episode {
     pub video: Video,
@@ -34,14 +37,15 @@ pub struct Episode {
 }
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
-          CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
-          CREATE TABLE IF NOT EXISTS sources(id TEXT PRIMARY KEY,kind TEXT NOT NULL,youtube_id TEXT NOT NULL,url TEXT NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',folder TEXT NOT NULL UNIQUE,phase TEXT NOT NULL DEFAULT 'idle',error TEXT,feed_url TEXT,next_sync INTEGER NOT NULL DEFAULT 0) STRICT;
-          CREATE TABLE IF NOT EXISTS episodes(source TEXT NOT NULL REFERENCES sources(id),id TEXT NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',published TEXT,duration REAL NOT NULL,available INTEGER NOT NULL,position INTEGER NOT NULL,present INTEGER NOT NULL DEFAULT 1,state TEXT NOT NULL,bytes INTEGER NOT NULL DEFAULT 0,public_url TEXT,PRIMARY KEY(source,id)) STRICT;
-          CREATE INDEX IF NOT EXISTS episodes_presence ON episodes(source,present,state);
-          PRAGMA user_version=1;
-          UPDATE sources SET phase='idle' WHERE phase IS NOT 'idle' AND phase IS NOT 'error';")?;
+        let mut conn = Connection::open(path)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )?;
+        migrations::run(&mut conn)?;
+        conn.execute(
+            "UPDATE sources SET phase='idle',next_sync=0 WHERE phase IS NOT 'idle' AND phase IS NOT 'error'",
+            [],
+        )?;
         Ok(Self(Arc::new(Mutex::new(conn))))
     }
     pub fn sources(&self) -> Result<Vec<Source>> {
@@ -83,7 +87,7 @@ impl Database {
         let tx = db.transaction()?;
         tx.execute("UPDATE episodes SET present=0 WHERE source IS ?", [id])?;
         for (position, v) in snapshot.videos.iter().enumerate() {
-            tx.execute("INSERT INTO episodes(source,id,title,description,published,duration,available,position,state) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source,id) DO UPDATE SET present=1,title=excluded.title,available=excluded.available,position=excluded.position,state=CASE WHEN episodes.state IS 'uploaded' THEN 'uploaded' WHEN excluded.available IS 0 THEN 'skipped' ELSE 'pending' END", params![id,v.id,v.title,v.description,v.published,v.duration,v.available,position as i64,if v.available {"pending"} else {"skipped"}])?;
+            tx.execute("INSERT INTO episodes(source,id,title,description,published,duration,available,position,state) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source,id) DO UPDATE SET present=1,title=excluded.title,published=coalesce(episodes.published,excluded.published),available=excluded.available,position=excluded.position,state=CASE WHEN episodes.state IS 'uploaded' THEN 'uploaded' WHEN excluded.available IS 0 THEN 'skipped' ELSE 'pending' END", params![id,v.id,v.title,v.description,v.published,v.duration,v.available,position as i64,if v.available {"pending"} else {"skipped"}])?;
         }
         tx.execute(
             "UPDATE sources SET title=?,description=? WHERE id IS ?",
@@ -119,6 +123,15 @@ impl Database {
         self.0.lock().execute("UPDATE episodes SET state='uploaded',title=?,description=?,published=coalesce(?,published),duration=?,bytes=?,public_url=? WHERE source IS ? AND id IS ?", params![video.title,video.description,video.published,video.duration,bytes as i64,url,source,video.id])?;
         Ok(())
     }
+    pub fn pending_episodes(&self, source: &str) -> Result<Vec<Episode>> {
+        Ok(self
+            .episodes(source)?
+            .into_iter()
+            .filter(|episode| {
+                episode.present && episode.video.available && episode.state != "uploaded"
+            })
+            .collect())
+    }
     pub fn forget(&self, source: &str, video: &str) -> Result<()> {
         self.0.lock().execute(
             "DELETE FROM episodes WHERE source IS ? AND id IS ? AND present IS 0",
@@ -147,21 +160,246 @@ impl Database {
         )?;
         Ok(())
     }
-    pub fn bind_storage(&self, identity: &str) -> Result<()> {
-        let db = self.0.lock();
-        let existing: Option<String> = db
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot() -> Snapshot {
+        Snapshot {
+            title: "Eight videos".into(),
+            description: String::new(),
+            cover_url: None,
+            videos: (0..8)
+                .map(|index| Video {
+                    id: format!("video{index}"),
+                    title: format!("Video {index}"),
+                    description: String::new(),
+                    published: Some("2011-01-11".into()),
+                    duration: 300.0,
+                    available: true,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn flat_dates_backfill_without_losing_exact_dates_or_upload_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("dates.sqlite");
+        let db = Database::open(&path).unwrap();
+        let source = db
+            .add("playlist", "test", "https://www.youtube.com")
+            .unwrap();
+        let mut snapshot = snapshot();
+        snapshot.videos.truncate(3);
+        snapshot.videos[0].published = None;
+        snapshot.videos[1].published = Some("2011-01-11T13:41:25+00:00".into());
+        snapshot.videos[2].published = Some("2011-09-24T00:00:00+00:00".into());
+        db.snapshot(&source, &snapshot).unwrap();
+        for video in &snapshot.videos {
+            db.uploaded(
+                &source,
+                video,
+                123,
+                "https://audio.example.com/existing.m4a",
+            )
+            .unwrap();
+        }
+        // Repeated relative-date estimates can drift; keep the first saved value.
+        for video in &mut snapshot.videos {
+            video.published = Some("2011-09-25T00:00:00+00:00".into());
+        }
+        db.snapshot(&source, &snapshot).unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        for video in &mut snapshot.videos {
+            video.published = Some("2011-09-26T00:00:00+00:00".into());
+        }
+        db.snapshot(&source, &snapshot).unwrap();
+        let episodes = db.episodes(&source).unwrap();
+        assert_eq!(
+            episodes
+                .iter()
+                .map(|e| e.video.published.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("2011-09-25T00:00:00+00:00"),
+                Some("2011-01-11T13:41:25+00:00"),
+                Some("2011-09-24T00:00:00+00:00"),
+            ]
+        );
+        assert!(db.pending_episodes(&source).unwrap().is_empty());
+        for episode in episodes {
+            assert_eq!(episode.state, "uploaded");
+            assert_eq!(episode.bytes, 123);
+            assert_eq!(
+                episode.public_url.as_deref(),
+                Some("https://audio.example.com/existing.m4a")
+            );
+        }
+    }
+
+    #[test]
+    fn media_dates_can_improve_estimates_but_missing_media_dates_keep_them() {
+        let db = Database::open(Path::new(":memory:")).unwrap();
+        let source = db
+            .add("playlist", "test", "https://www.youtube.com")
+            .unwrap();
+        let mut snapshot = snapshot();
+        snapshot.videos.truncate(2);
+        for video in &mut snapshot.videos {
+            video.published = Some("2011-09-24T00:00:00+00:00".into());
+        }
+        db.snapshot(&source, &snapshot).unwrap();
+        snapshot.videos[0].published = Some("2011-01-11T13:41:25+00:00".into());
+        snapshot.videos[1].published = None;
+        for video in &snapshot.videos {
+            db.uploaded(
+                &source,
+                video,
+                123,
+                "https://audio.example.com/existing.m4a",
+            )
+            .unwrap();
+        }
+        let episodes = db.episodes(&source).unwrap();
+        assert_eq!(
+            episodes[0].video.published.as_deref(),
+            Some("2011-01-11T13:41:25+00:00")
+        );
+        assert_eq!(
+            episodes[1].video.published.as_deref(),
+            Some("2011-09-24T00:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn crash_after_four_uploads_child() {
+        let Some(path) = std::env::var_os("MAZIT_CHECKPOINT_TEST_DB") else {
+            return;
+        };
+        let db = Database::open(Path::new(&path)).unwrap();
+        let source = db
+            .add(
+                "playlist",
+                "test",
+                "https://www.youtube.com/playlist?list=test",
+            )
+            .unwrap();
+        let snapshot = snapshot();
+        db.snapshot(&source, &snapshot).unwrap();
+        db.published(&source, "https://audio.example.com/rss.xml")
+            .unwrap();
+        db.phase(&source, "downloading", None).unwrap();
+        for video in &snapshot.videos[..4] {
+            db.uploaded(
+                &source,
+                video,
+                123,
+                &format!("https://audio.example.com/{}.m4a", video.id),
+            )
+            .unwrap();
+        }
+        // Exit without dropping the connection, checkpointing WAL on close, or cleaning up.
+        std::process::exit(86);
+    }
+
+    #[test]
+    fn crash_after_four_of_eight_uploads_resumes_only_the_remaining_four() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mazit.sqlite");
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "database::tests::crash_after_four_uploads_child",
+                "--nocapture",
+            ])
+            .env("MAZIT_CHECKPOINT_TEST_DB", &path)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(86),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let db = Database::open(&path).unwrap();
+        let source = db.source("playlist:test").unwrap();
+        assert_eq!((source.uploaded, source.total), (4, 8));
+        assert_eq!(source.phase, "idle");
+        assert_eq!(source.next_sync, 0);
+        assert_eq!(
+            source.feed_url.as_deref(),
+            Some("https://audio.example.com/rss.xml")
+        );
+        db.snapshot(&source.id, &snapshot()).unwrap();
+        let pending = db.pending_episodes(&source.id).unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|episode| episode.video.id.as_str())
+                .collect::<Vec<_>>(),
+            ["video4", "video5", "video6", "video7"]
+        );
+        for episode in db.episodes(&source.id).unwrap().iter().take(4) {
+            assert_eq!(episode.state, "uploaded");
+            assert_eq!(episode.bytes, 123);
+            assert_eq!(
+                episode.public_url.as_deref(),
+                Some(format!("https://audio.example.com/{}.m4a", episode.video.id).as_str())
+            );
+        }
+        for episode in pending {
+            db.uploaded(
+                &source.id,
+                &episode.video,
+                123,
+                &format!("https://audio.example.com/{}.m4a", episode.video.id),
+            )
+            .unwrap();
+        }
+        assert!(db.pending_episodes(&source.id).unwrap().is_empty());
+        assert_eq!(db.source(&source.id).unwrap().uploaded, 8);
+        let feed = crate::rss::render(
+            &source,
+            &db.episodes(&source.id).unwrap(),
+            "https://audio.example.com/rss.xml",
+            None,
+        )
+        .unwrap();
+        assert_eq!(feed.matches("<item>").count(), 8);
+        let connection = db.0.lock();
+        let has_settings: bool = connection
             .query_row(
-                "SELECT value FROM settings WHERE key IS 'storage'",
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name IS 'settings')",
                 [],
                 |row| row.get(0),
             )
-            .optional()?;
-        let count: i64 = db.query_row("SELECT count(*) FROM sources", [], |row| row.get(0))?;
-        ensure!(
-            count == 0 || existing.as_deref() == Some(identity),
-            "Existing feeds are tied to their storage location; migration is required to move them"
-        );
-        db.execute("INSERT INTO settings(key,value) VALUES('storage',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [identity])?;
-        Ok(())
+            .unwrap();
+        assert!(!has_settings);
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn interrupted_publication_and_cleanup_are_retried_on_restart() {
+        for phase in ["scanning", "publishing", "cleaning"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("mazit.sqlite");
+            let db = Database::open(&path).unwrap();
+            let source = db
+                .add("playlist", "test", "https://www.youtube.com")
+                .unwrap();
+            db.published(&source, "https://audio.example.com/rss.xml")
+                .unwrap();
+            db.phase(&source, phase, None).unwrap();
+            drop(db);
+            let reopened = Database::open(&path).unwrap();
+            assert_eq!(reopened.source(&source).unwrap().next_sync, 0);
+        }
     }
 }

@@ -34,6 +34,8 @@ llrt_utils = { package = "llrt_utils_watts", version = "=0.8.1-beta" }
 log = "0.4"
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "cookies", "gzip", "brotli"] }
+refinery = { version = "=0.9.2", default-features = false, features = ["rusqlite"] }
+regex = "1"
 rquickjs = { version = "=0.11.0", features = ["full-async"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

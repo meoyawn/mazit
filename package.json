@@ -2,6 +2,9 @@
   "name": "mazit-youtube-bridge",
   "private": true,
   "license": "MIT",
+  "scripts": {
+    "test": "bun test scripts"
+  },
   "dependencies": {
     "youtubei.js": "18.0.0"
   },
