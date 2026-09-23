@@ -69,23 +69,23 @@ Reference: [Public buckets and custom domains](https://developers.cloudflare.com
 
 Mazit needs write and delete access for publishing, multipart uploads, verification, and episode cleanup. Read-only access is insufficient; bucket administration permissions are unnecessary.
 
-Enter the generated S3 key pair into Mazit. Do not substitute your account ID, a general Cloudflare bearer token, or Global API Key. Never put credentials in RSS URLs or commit them to documentation.
-
-After verification succeeds, the desktop app saves its configuration in macOS Keychain.
+Enter the generated S3 key pair in `~/.config/mazit/config.toml`. Do not substitute your account ID, a general Cloudflare bearer token, or Global API Key. Never put credentials in RSS URLs or commit them to documentation.
 
 Reference: [R2 authentication](https://developers.cloudflare.com/r2/api/tokens/).
 
-## 3. Fill in Mazit’s storage form
+## 3. Fill in Mazit’s TOML config
 
-| Field                | Value                                           | Notes                                                                                                                     |
+Open **config.toml** in the desktop app and fill in its `[s3]` table. The complete schema and example are in the [README](../README.md#storage-configuration).
+
+| TOML key             | Value                                           | Notes                                                                                                                     |
 | -------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| S3 endpoint          | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` | Copy the S3 API hostname from the bucket settings. Remove the trailing `/podcasts`; Mazit supplies the bucket separately. |
-| Region               | `auto`                                          | Do not use `EEUR`.                                                                                                        |
-| Bucket               | `podcasts`                                      | Bucket name only.                                                                                                         |
-| Folder prefix / path | `mazit`                                         | Optional; blank is also valid. Choose before creating subscriptions.                                                      |
-| Public base URL      | `https://audio.example.com`                     | The public bucket origin, without the bucket name or folder prefix.                                                       |
-| Access key ID        | Your generated Access Key ID                    | From the R2 token creation screen.                                                                                        |
-| Secret access key    | Your generated Secret Access Key                | From the same screen.                                                                                                     |
+| `endpoint`           | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` | Copy the S3 API hostname from the bucket settings. Remove the trailing `/podcasts`; Mazit supplies the bucket separately. |
+| `region`             | `auto`                                          | Do not use `EEUR`.                                                                                                        |
+| `bucket`             | `podcasts`                                      | Bucket name only.                                                                                                         |
+| `root`               | `mazit`                                         | Optional; blank is also valid. Choose before creating subscriptions.                                                      |
+| `public_base_url`    | `https://audio.example.com`                     | The public bucket origin, without the bucket name or folder prefix.                                                       |
+| `access_key_id`      | Your generated Access Key ID                    | From the R2 token creation screen.                                                                                        |
+| `secret_access_key`  | Your generated Secret Access Key                | From the same screen.                                                                                                     |
 
 For jurisdiction-restricted buckets, retain the jurisdiction-specific S3 hostname shown by Cloudflare, such as `.eu.r2.cloudflarestorage.com`. A location hint such as EEUR does not itself imply that endpoint. See [R2 endpoint requirements](https://developers.cloudflare.com/r2/api/tokens/).
 
@@ -102,7 +102,7 @@ Audio: https://audio.example.com/mazit/playlist-PLAYLIST_ID/VIDEO_ID.m4a
 
 The source folder is illustrative. Copy the real feed URL from Mazit. Putting `mazit` in both the public base URL and prefix would duplicate that folder.
 
-Select **Verify & connect**. Mazit uploads a uniquely named text file, reads its contents through the public URL, checks them, and deletes the object. This checks write access, public reads, and cleanup; it does not verify CDN hits or byte ranges.
+Save the file and select **Reload config**. Mazit uploads a uniquely named text file, reads its contents through the public URL, checks them, and deletes the object. It then refreshes every saved YouTube subscription and publishes changes to S3. The verification checks write access, public reads, and cleanup; it does not verify CDN hits or byte ranges.
 
 Once connected, add a playlist or channel, let synchronization finish, and select **Copy RSS URL** to subscribe in your podcast app.
 
@@ -262,9 +262,9 @@ Shared RSS caching could use a short origin-provided TTL such as `public, max-ag
 - [ ] The domain uses the Free plan; no paid delivery packages or trials were added.
 - [ ] The bucket uses Standard storage, and R2 request usage is within the free allowances.
 - [ ] Custom domain is Active on the intended public bucket.
-- [ ] Bucket-scoped Object Read & Write credentials are saved in Mazit.
+- [ ] Bucket-scoped Object Read & Write credentials are saved in `~/.config/mazit/config.toml`.
 - [ ] Region, endpoint, prefix, and public URL are correct.
-- [ ] Verify & connect succeeds before adding subscriptions.
+- [ ] Reload config succeeds before adding subscriptions.
 - [ ] Audio caches; RSS and connection probes bypass the edge cache.
 - [ ] A real audio request shows a cache HIT.
 - [ ] A range request returns `206` and the expected bytes.
@@ -273,4 +273,4 @@ Shared RSS caching could use a short origin-provided TTL such as `public, max-ag
 
 ### Implementation references
 
-Current behavior comes from [storage.rs](../src/storage.rs) (S3, headers, public URLs, verification), [engine.rs](../src/engine.rs) (Keychain, publication, naming, deletion), [database.rs](../src/database.rs) (destination binding), and [rss.rs](../src/rss.rs) (RSS and enclosure URLs).
+Current behavior comes from [config.rs](../src/config.rs) (TOML config), [storage.rs](../src/storage.rs) (S3, headers, public URLs, verification), [engine.rs](../src/engine.rs) (publication, naming, deletion), [database.rs](../src/database.rs) (destination binding), and [rss.rs](../src/rss.rs) (RSS and enclosure URLs).

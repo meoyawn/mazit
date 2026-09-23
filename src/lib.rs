@@ -1,4 +1,5 @@
 pub mod audio;
+pub mod config;
 pub mod database;
 #[cfg(feature = "desktop")]
 pub mod desktop;

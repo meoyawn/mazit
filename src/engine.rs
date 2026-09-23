@@ -1,6 +1,7 @@
 use crate::{
+    config,
     database::{Database, Episode, Source},
-    storage::{Storage, StorageConfig},
+    storage::Storage,
     youtube::YouTube,
 };
 use anyhow::{Context, Result, ensure};
@@ -21,9 +22,9 @@ pub struct ViewState {
     pub message: String,
 }
 pub enum Command {
-    Configure(StorageConfig),
     Add(String),
     Refresh(Option<String>),
+    ReloadConfig,
 }
 #[derive(Clone)]
 pub struct Engine {
@@ -195,53 +196,104 @@ impl Engine {
             state: state.clone(),
             sender,
         };
-        let credential_key =
-            keyring::Entry::new("io.github.meoyawn.mazit", &core.directory.to_string_lossy())?;
-        let mut config: Option<StorageConfig> = match credential_key.get_password() {
-            Ok(json) => match StorageConfig::from_json(&json) {
-                Ok(config) => Some(config),
-                Err(error) => {
-                    state.write().message = format!(
-                        "Saved storage could not be loaded: {} Your saved credentials and subscriptions have been kept. Connect S3-compatible storage if this library is empty; otherwise start a separate library with --data-dir to use a new destination.",
-                        crate::redact(&error.to_string())
-                    );
-                    None
-                }
-            },
-            Err(keyring::Error::NoEntry) => None,
-            Err(error) => return Err(error.into()),
+        let config_path = config::path()?;
+        let initial_text = match config::read_text(&config_path) {
+            Ok(text) => text,
+            Err(error) => {
+                state.write().message = crate::redact(&error.to_string());
+                None
+            }
         };
-        let mut storage = config.clone().map(Storage::new).transpose()?;
-        if let Some(config) = &config {
-            core.db.bind_storage(&config.identity())?;
+        let mut storage = None;
+        if let Some(text) = &initial_text {
+            let loaded = (|| -> Result<Storage> {
+                let settings = config::parse(text)?;
+                let candidate = Storage::new(settings.clone())?;
+                core.db.bind_storage(&settings.identity())?;
+                Ok(candidate)
+            })();
+            match loaded {
+                Ok(candidate) => storage = Some(candidate),
+                Err(error) => state.write().message = crate::redact(&error.to_string()),
+            }
         }
         state.write().configured = storage.is_some();
         state.write().sources = core.db.sources()?;
         runtime.spawn(async move {
-            let changed = || { if let Ok(sources) = core.db.sources() { state.write().sources = sources; } };
-            let mut interval = tokio::time::interval(Duration::from_secs(30)); interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let changed = || {
+                if let Ok(sources) = core.db.sources() {
+                    state.write().sources = sources;
+                }
+            };
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                let command = tokio::select! { command = receiver.recv() => { let Some(command) = command else { break }; Some(command) }, _ = interval.tick() => None };
-                let mut ids = Vec::new(); state.write().busy = true;
+                let command = tokio::select! {
+                    command = receiver.recv() => {
+                        let Some(command) = command else { break };
+                        Some(command)
+                    },
+                    _ = interval.tick() => None,
+                };
+                let mut ids = Vec::new();
+                state.write().busy = true;
                 let operation: Result<()> = async {
                     match command {
-                        Some(Command::Configure(next)) => {
-                            let candidate = Storage::new(next.clone())?;
-                            if !core.db.sources()?.is_empty() { ensure!(config.as_ref().is_some_and(|old| old.identity() == next.identity()), "Existing feeds cannot be moved to another storage location"); }
+                        Some(Command::Add(url)) => {
+                            ensure!(storage.is_some(), "Fill in config.toml first");
+                            ids.push(core.add(&url).await?);
+                        }
+                        Some(Command::Refresh(selected)) => {
+                            ids = core
+                                .db
+                                .sources()?
+                                .into_iter()
+                                .filter(|source| {
+                                    selected.as_ref().is_none_or(|id| id == &source.id)
+                                })
+                                .map(|s| s.id)
+                                .collect();
+                        }
+                        Some(Command::ReloadConfig) => {
+                            let settings = config::load(&config_path)?;
+                            let candidate = Storage::new(settings.clone())?;
+                            core.db.bind_storage(&settings.identity())?;
                             candidate.verify().await?;
-                            credential_key.set_password(&serde_json::to_string(&next)?)?;
-                            core.db.bind_storage(&next.identity())?;
-                            config = Some(next); storage = Some(candidate); state.write().configured = true; state.write().message = "Storage connected".into();
-                        },
-                        Some(Command::Add(url)) => { ensure!(storage.is_some(), "Connect storage first"); ids.push(core.add(&url).await?); },
-                        Some(Command::Refresh(selected)) => { ids = core.db.sources()?.into_iter().filter(|source| selected.as_ref().is_none_or(|id| id == &source.id)).map(|s|s.id).collect(); },
-                        None => { ids = core.db.sources()?.into_iter().filter(|s|s.next_sync <= chrono::Utc::now().timestamp()).map(|s|s.id).collect(); },
+                            storage = Some(candidate);
+                            state.write().configured = true;
+                            state.write().message = "Storage config loaded and verified".into();
+                            ids = core
+                                .db
+                                .sources()?
+                                .into_iter()
+                                .map(|source| source.id)
+                                .collect();
+                        }
+                        None => {
+                            ids = core
+                                .db
+                                .sources()?
+                                .into_iter()
+                                .filter(|s| s.next_sync <= chrono::Utc::now().timestamp())
+                                .map(|s| s.id)
+                                .collect();
+                        }
                     }
-                    if let Some(storage) = &storage { for id in ids { if let Err(error) = core.sync(&id,storage,&changed).await { state.write().message = crate::redact(&error.to_string()); } } }
+                    if let Some(storage) = &storage {
+                        for id in ids {
+                            if let Err(error) = core.sync(&id, storage, &changed).await {
+                                state.write().message = crate::redact(&error.to_string());
+                            }
+                        }
+                    }
                     Ok(())
-                }.await;
-                if let Err(error) = operation { state.write().message = crate::redact(&error.to_string()); }
-                changed(); state.write().busy = false;
+                }
+                .await;
+                if let Err(error) = operation {
+                    state.write().message = crate::redact(&error.to_string());
+                }
+                changed();
+                state.write().busy = false;
             }
         });
         Ok(engine)

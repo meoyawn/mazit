@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mazit::{
+    config,
     engine::{Core, data_directory},
-    storage::{Storage, StorageConfig},
+    storage::Storage,
 };
 use std::path::PathBuf;
 
@@ -22,10 +23,10 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Synchronize once using an explicit storage configuration file.
+    /// Synchronize once using config.toml (or another TOML file with --config).
     Sync {
         #[arg(long)]
-        config: PathBuf,
+        config: Option<PathBuf>,
         #[arg(long)]
         source: Option<String>,
     },
@@ -71,8 +72,11 @@ fn run() -> Result<()> {
             Ok(())
         }),
         Some(Action::Sync { config, source }) => runtime.block_on(async {
-            let config = StorageConfig::from_json(&std::fs::read_to_string(config)?)
-                .context("Read storage configuration")?;
+            let config_path = match config {
+                Some(path) => path,
+                None => config::path()?,
+            };
+            let config = config::load(&config_path)?;
             let storage = Storage::new(config.clone())?;
             storage.verify().await?;
             core.db.bind_storage(&config.identity())?;

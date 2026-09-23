@@ -1,6 +1,6 @@
 use crate::{
+    config,
     engine::{Command, Engine},
-    storage::StorageConfig,
 };
 use gpui::*;
 use gpui_component::{
@@ -17,8 +17,6 @@ use tray_icon::{
 struct MazitView {
     engine: Engine,
     source: Entity<InputState>,
-    fields: Vec<Entity<InputState>>,
-    settings: bool,
     _tray: TrayIcon,
     open_id: tray_icon::menu::MenuId,
     refresh_id: tray_icon::menu::MenuId,
@@ -26,39 +24,12 @@ struct MazitView {
     #[cfg(target_os = "macos")]
     _activity: Activity,
 }
-const LABELS: [&str; 7] = [
-    "S3 endpoint",
-    "Region",
-    "Bucket",
-    "Folder prefix / path",
-    "Public base URL",
-    "Access key ID",
-    "Secret access key",
-];
 
 impl MazitView {
     fn new(engine: Engine, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let source = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Paste a YouTube playlist or channel URL")
         });
-        let fields = LABELS
-            .iter()
-            .enumerate()
-            .map(|(index, label)| {
-                cx.new(|cx| {
-                    let mut state = InputState::new(window, cx)
-                        .placeholder(*label)
-                        .masked(index >= 6);
-                    if index == 1 {
-                        state.set_value("us-east-1", window, cx);
-                    }
-                    if index == 3 {
-                        state.set_value("mazit", window, cx);
-                    }
-                    state
-                })
-            })
-            .collect();
         let menu = Menu::new();
         let open = MenuItem::new("Open Mazit", true, None);
         let refresh = MenuItem::new("Refresh all", true, None);
@@ -114,12 +85,9 @@ impl MazitView {
             }
         })
         .detach();
-        let settings = !engine.state.read().configured;
         Self {
             engine,
             source,
-            fields,
-            settings,
             _tray: tray,
             open_id: open.id().clone(),
             refresh_id: refresh.id().clone(),
@@ -128,20 +96,12 @@ impl MazitView {
             _activity: Activity::new(),
         }
     }
-    fn value(&self, index: usize, cx: &App) -> String {
-        self.fields[index].read(cx).value().trim().to_string()
-    }
-    fn configure(&self, cx: &App) {
-        let config = StorageConfig::S3 {
-            endpoint: self.value(0, cx),
-            region: self.value(1, cx),
-            bucket: self.value(2, cx),
-            root: self.value(3, cx),
-            public_base_url: self.value(4, cx),
-            access_key_id: self.value(5, cx),
-            secret_access_key: self.value(6, cx),
+    fn open_config(&self, cx: &mut Context<Self>) {
+        self.engine.state.write().message = match config::open_in_editor() {
+            Ok(()) => "Opened config.toml; save it, then select Reload config".into(),
+            Err(error) => crate::redact(&format!("{error:#}")),
         };
-        self.engine.command(Command::Configure(config));
+        cx.notify();
     }
 }
 impl Render for MazitView {
@@ -167,19 +127,18 @@ impl Render for MazitView {
                     .child("YOUR AUDIO, EVERYWHERE"),
             )
             .child(
-                Button::new("library")
-                    .label("Library")
+                Button::new("settings")
+                    .label("Open config.toml")
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings = false;
-                        cx.notify();
+                        this.open_config(cx);
                     })),
             )
             .child(
-                Button::new("settings")
-                    .label("Storage settings")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings = true;
-                        cx.notify();
+                Button::new("reload-config")
+                    .label("Reload config")
+                    .disabled(state.busy)
+                    .on_click(cx.listener(|this, _, _, _| {
+                        this.engine.command(Command::ReloadConfig);
                     })),
             );
         for source in &state.sources {
@@ -215,7 +174,7 @@ impl Render for MazitView {
                     .h_flex()
                     .justify_between()
                     .child(div().text_2xl().font_weight(FontWeight::BOLD).child(
-                        if self.settings || !state.configured {
+                        if !state.configured {
                             "Connect your storage"
                         } else {
                             "Your listening library"
@@ -240,48 +199,21 @@ impl Render for MazitView {
                     .child(state.message.clone()),
             );
         }
-        if self.settings || !state.configured {
-            let mut settings = div()
-                .id("storage-form")
-                .v_flex()
-                .overflow_y_scroll()
-                .gap_4()
-                .flex_1()
-                .child(
-                    "Connect S3-compatible storage for your podcast feeds. Credentials stay in macOS Keychain.",
-                )
-                .child(
-                    div().text_sm().child("Your public bucket URL must serve RSS and audio files directly, without a login. Mazit appends the folder prefix to that URL."),
-                );
-            for (index, label) in LABELS.iter().enumerate() {
-                settings = settings.child(
-                    div()
-                        .v_flex()
-                        .gap_1()
-                        .child(*label)
-                        .child(Input::new(&self.fields[index])),
-                );
-            }
-            settings = settings.child(
-                Button::new("connect")
-                    .primary()
-                    .label(if state.busy {
-                        "Working…"
-                    } else {
-                        "Verify & connect"
-                    })
-                    .disabled(state.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.configure(cx))),
+        if !state.configured {
+            content = content.child(
+                div()
+                    .v_flex()
+                    .gap_4()
+                    .p_5()
+                    .rounded_xl()
+                    .bg(rgb(0xffffff))
+                    .child("Fill in the [s3] section of ~/.config/mazit/config.toml, save it, then select Reload config.")
+                    .child("Your public base URL must serve RSS and audio files directly, without a login.")
+                    .child(Button::new("open-config")
+                        .primary()
+                        .label("Open config.toml")
+                        .on_click(cx.listener(|this, _, _, cx| this.open_config(cx)))),
             );
-            if state.configured {
-                settings = settings.child(Button::new("done").label("Open library").on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.settings = false;
-                        cx.notify();
-                    }),
-                ));
-            }
-            content = content.child(settings);
         } else {
             content = content.child(
                 div()

@@ -2,7 +2,7 @@
 
 A macOS desktop app for listening to YouTube as a podcast. Add a playlist or channel, connect your own S3-compatible storage, and subscribe to the published `rss.xml` feed in your podcast player.
 
-Mazit downloads audio, prepares fast-start M4A files, and refreshes feeds in the background. Storage must provide direct public URLs for feeds and audio. Desktop storage credentials are saved in macOS Keychain.
+Mazit downloads audio, prepares fast-start M4A files, and refreshes feeds in the background. Storage must provide direct public URLs for feeds and audio. S3 settings and credentials live in `~/.config/mazit/config.toml`.
 
 [Cloudflare R2 setup and CDN guide](docs/cloudflare-r2.md) — storage credentials, free CDN features, request budgets, byte-range playback, and ETag checks.
 
@@ -27,6 +27,29 @@ The build prepares FFmpeg and the embedded YouTube.js bridge automatically.
 - `task lint` — format the Rust workspace, then run Clippy.
 
 The dependency graph is `run → build:debug → prepare` and `build → prepare`. Preparation bundles the YouTube bridge with Bun and runs the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build checksum-verified FFmpeg libraries when missing. JavaScript installation runs before bundling; Rust compilation waits for both the bridge and FFmpeg. Use `task run -- --help` for the command-line options, including one-shot synchronization and a custom library directory.
+
+## Storage configuration
+
+Select **Open config.toml** in the desktop app. The button creates `~/.config/mazit/config.toml` with an empty template and opens it using the `EDITOR` environment variable. For example, launch Mazit with `EDITOR='code --wait' task run`. If `EDITOR` is unset, Mazit opens the file in TextEdit. Set `EDITOR` in the environment that launches the app if you use the macOS app bundle.
+
+Fill in the TOML file with your S3-compatible storage details:
+
+```toml
+[s3]
+endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
+region = "auto"
+bucket = "podcasts"
+root = "mazit"
+public_base_url = "https://audio.example.com"
+access_key_id = "<ACCESS_KEY_ID>"
+secret_access_key = "<SECRET_ACCESS_KEY>"
+```
+
+The schema has one `[s3]` table. All keys except `root` are required strings. `root` is an optional folder prefix and defaults to `""`; omit it or leave it empty to write at the bucket root. `endpoint` is the S3 API URL, `region` is the signing region, and `bucket` is the bucket name. `public_base_url` is the direct public URL for that bucket, without `root`; Mazit appends `root` and the subscription folder to published URLs. `access_key_id` and `secret_access_key` are the S3 key pair. Unknown keys are rejected. Storage URLs must use HTTPS, except HTTP on localhost for development.
+
+Save the file, then select **Reload config** to apply it. A successful reload verifies S3 access, refreshes every saved YouTube subscription, and uploads any changes to S3. An existing library cannot switch to another endpoint, region, bucket, root, or public base URL after subscriptions have been added. To synchronize once from the command line, run `task run -- sync`; use `task run -- sync --config /absolute/path/config.toml` for another TOML file. The same schema is used in both cases.
+
+The file contains secrets. Mazit creates its config directory with mode `0700` and its template with mode `0600`; it tightens the permissions of an existing config file to `0600` when reading it. Keep the file outside the repository and do not share its contents.
 
 ## Privacy
 

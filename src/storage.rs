@@ -9,14 +9,12 @@ use aws_sdk_s3::{
     primitives::{ByteStream, Length},
     types::{CompletedMultipartUpload, CompletedPart},
 };
-use serde::{Deserialize, Serialize};
 use std::{path::Path, time::Duration};
 
 const PART_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_PARTS: u64 = 10_000;
 
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, PartialEq, Eq)]
 pub enum StorageConfig {
     S3 {
         endpoint: String,
@@ -29,17 +27,6 @@ pub enum StorageConfig {
     },
 }
 impl StorageConfig {
-    pub fn from_json(json: &str) -> Result<Self> {
-        let value: serde_json::Value = serde_json::from_str(json)?;
-        ensure!(
-            !matches!(
-                value.get("kind").and_then(|kind| kind.as_str()),
-                Some("yandex" | "google_drive")
-            ),
-            "Yandex Disk and Google Drive are no longer supported because they require a public link resolver. Use S3-compatible storage with direct public file access."
-        );
-        Ok(serde_json::from_value(value)?)
-    }
     pub fn root(&self) -> &str {
         match self {
             Self::S3 { root, .. } => root,
