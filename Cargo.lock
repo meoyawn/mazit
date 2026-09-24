@@ -10094,12 +10094,14 @@ dependencies = [
 name = "youtubei"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "llrt_modules",
  "llrt_utils_watts",
  "rquickjs",
  "serde",
  "serde_json",
  "sha1 0.10.7",
+ "tokio",
  "uuid",
 ]
 

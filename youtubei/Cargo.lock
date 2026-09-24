@@ -2852,6 +2852,7 @@ dependencies = [
 name = "youtubei"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "llrt_modules",
  "llrt_utils_watts",
  "rquickjs",

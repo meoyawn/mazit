@@ -14,6 +14,9 @@ An app-worker integration test starts the actual dedicated thread, initializes a
 real upstream session, overlaps two scans of the same playlist with an audio
 request, and verifies continuation isolation, session reuse, and recovery after
 an API error. Only its HTTP responses are fixtures.
+The overlapping first-page responses are delayed by different amounts so one
+scan must keep progressing after the other finishes. The `youtubei` crate owns
+the worker, runtime scheduling, and tests for shared callers across threads.
 
 `task test:youtube-versions` runs the crate and desktop integration tests against
 npm releases 18.0.0 and 18.1.0. The bindings target the 18+ API. The script
@@ -29,7 +32,8 @@ For a live end-to-end check, run `task prepare`, then
 `bun run scripts/test-youtube-live.ts`. It enumerates a long playlist and a
 channel's uploads with yt-dlp using flat pages, then exercises the app's actual
 subscription, HTTP transport, worker, QuickJS, parsing, and database paths. Every
-video ID and its order must match. It uses a temporary database, performs no
+video ID and its order must match. Both scans run concurrently under a 30-second
+deadline to cover startup scheduling. It uses a temporary database, performs no
 per-video lookups or media downloads, and needs yt-dlp installed.
 
 `src/desktop/tests.rs` renders the production `MazitView` under GPUI Component's `Root`, using `#[gpui::test]`. The test platform provides its own window, clipboard, opened-URL recorder, and deterministic executor. Native menu-bar and macOS window integration are attached separately by the production startup code.
@@ -45,6 +49,10 @@ Adaptive admission tests use deterministic throughput samples to cover growth, s
 The layout checks use multiple window widths and a long RSS URL. Artwork tests decode small landscape and portrait PNG fixtures and inspect the image's paint-time content mask. Removing `overflow_hidden()` from the production artwork container must fail the clipping regression test. Other checks exercise cover replacement and removal through the actual state-polling loop by advancing GPUI's test clock.
 
 These are headless UI integration tests, not pixel-golden tests or an end-to-end test against live services. GPUI 0.2.2's test window performs layout and paint preparation but does not rasterize a GPU framebuffer. The separate engine tests cover publication order, S3 request bodies and content types, RSS artwork URLs, and preserving the existing feed when a cover upload fails.
+
+The scan-completion regression changes shared engine state from scanning to idle,
+advances the polling clock, and verifies the rendered status changes to “Up to
+date” before any input. It then checks that refresh becomes available again.
 
 ## Adding a regression
 

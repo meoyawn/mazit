@@ -80,6 +80,9 @@ async fn app_worker_reuses_session_and_keeps_concurrent_scans_independent() {
                     if let Some(index) = index {
                         assert_eq!(body["params"], "wgYCCAA=");
                         barrier.wait().await;
+                        // Responses finish separately so short scans cannot mask
+                        // a stalled longer scan.
+                        tokio::time::sleep(Duration::from_millis(50 * (index as u64 + 1))).await;
                         first_page(index)
                     } else {
                         let index: usize = body["continuation"].as_str().unwrap().parse().unwrap();

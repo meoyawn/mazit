@@ -122,17 +122,29 @@ slots. `Engine::fetch_with` accepts a Rust async HTTP
 callback, so the app retains its reqwest client and cookie jar. Request and
 response bodies cross this boundary as bytes, without JSON or base64 wrapping.
 
-QuickJS handles are `!Send` and `!Sync`. Reuse them in a current-thread Tokio
-runtime or a `LocalSet`; `tokio::join!` / `spawn_local` can overlap async calls in
-one engine. For a multithreaded app, create each engine **inside a dedicated
-worker thread**, send requests through channels, and return owned Rust data.
-See the runnable, network-free `examples/workers.rs`. Never attach a JS instance
-to an ordinary Tokio task that can migrate between executor threads. Rust media
-downloads can run on the multithreaded executor after receiving a URL/metadata.
-Mazit uses one dedicated thread with one engine and reusable Innertube session,
-overlapping up to sixteen operations while they await network I/O. Each playlist
-scan owns its continuation chain. Downloads remain on the app's existing worker
-pool.
+Use `Worker<Request>` to share a session across threads. Its handle is cloneable,
+`Send + Sync` when requests are `Send`. The crate owns the runtime thread and
+runs initialization, operations, and state destruction there. Its initializer
+can return local engines, sessions, caches, or application state; its handler
+borrows that state and returns a boxed local future. Requests can contain typed
+reply channels for owned results. Up to sixteen operations overlap while awaiting
+I/O, with backpressure after 32 queued requests. Dropping all worker handles drains
+accepted operations before destroying the state. See the runnable, network-free
+`examples/workers.rs` and cross-thread lifecycle tests in `tests/worker.rs`.
+
+Raw object handles remain `!Send` and `!Sync`, preventing accidental movement
+between runtime threads at compile time. Advanced consumers may use them directly
+on a current-thread executor or `LocalSet`, including `join!`, `spawn_local`, and
+`FuturesUnordered`. The engine encapsulates the rquickjs 0.11 scheduler's single
+waker: it forwards notifications to all pending Rust callers and unregisters each
+caller on completion or cancellation. A finishing short call cannot leave a
+longer call waiting on a retired task. No caller-side polling or wake-up workaround
+is needed. Runtime regressions cover staggered responses and cancellation.
+
+Mazit uses `Worker` with one reusable engine and Innertube session. Its YouTube
+module supplies application operations and timeouts without implementing a runtime
+thread or scheduler. Each playlist scan owns its continuation chain; media downloads
+remain on the app's existing worker pool after receiving owned URL/metadata.
 
 The crate embeds rquickjs 0.11 with LLRT 0.8.1-beta's Rust implementations of
 fetch, streams, URL, events, timers, encoding, and crypto. Rust supplies
@@ -153,8 +165,8 @@ establish compatibility of every upstream feature (e.g. account authentication).
 LLRT implements a subset of browser APIs. Cancelling a Rust wait does not itself
 abort a JavaScript operation; use the upstream AbortSignal/cancellation API when
 needed, and drive background jobs with `Engine::idle` while using subscriptions.
-Live validation on 2026-09-24 exercised Mazit's subscription, HTTP transport,
-worker, crate, and database paths. All 504 entries of
+Live validation on 2026-09-25 exercised Mazit's subscription, HTTP transport,
+worker, crate, and database paths with both scans running concurrently. All 504 entries of
 `PLipBN7O7_H3oq9oDRWagdZUoBOV81GCkT` and all 12 uploads of `@RyanFleury` matched
 yt-dlp's complete flat listings exactly, including order. Run
 `bun run scripts/test-youtube-live.ts` from the repository root after preparation

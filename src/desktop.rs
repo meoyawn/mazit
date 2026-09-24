@@ -370,6 +370,7 @@ impl Render for MazitView {
                             )
                             .child(
                                 div()
+                                    .debug_selector(|| format!("{}:status:{status}", source.id))
                                     .h_flex()
                                     .gap_1p5()
                                     .text_xs()

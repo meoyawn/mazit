@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 mod channel;
 mod client;
@@ -14,7 +13,7 @@ mod transport;
 
 #[derive(Clone)]
 pub struct YouTube {
-    sender: mpsc::Sender<client::Request>,
+    sender: youtubei::Worker<client::Request>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

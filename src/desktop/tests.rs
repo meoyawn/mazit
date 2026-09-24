@@ -116,6 +116,32 @@ fn refresh_dispatches_the_selected_source_and_respects_busy_state(cx: &mut TestA
 }
 
 #[gpui::test]
+fn scan_completion_repaints_without_input(cx: &mut TestAppContext) {
+    let mut state = library();
+    state.busy = true;
+    state.sources[0].phase = "scanning".into();
+    let (_, engine, mut commands, cx) = setup(cx, state);
+    assert!(cx.debug_bounds("playlist:test:status:Scanning").is_some());
+    assert!(cx.debug_bounds("playlist:test:status:Up to date").is_none());
+
+    {
+        let mut state = engine.state.write();
+        state.busy = false;
+        state.sources[0].phase = "idle".into();
+    }
+    cx.background_executor
+        .advance_clock(Duration::from_millis(500));
+    draw(cx);
+    assert!(cx.debug_bounds("playlist:test:status:Up to date").is_some());
+    assert!(commands.try_recv().is_err());
+
+    click(cx, "playlist:test:refresh");
+    assert!(
+        matches!(commands.try_recv().unwrap(), Command::Refresh(Some(id)) if id == "playlist:test")
+    );
+}
+
+#[gpui::test]
 fn delete_remains_available_during_sync_and_can_retry_a_failure(cx: &mut TestAppContext) {
     let mut state = library();
     state.busy = true;

@@ -1,4 +1,4 @@
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 use std::collections::HashSet;
 use youtubei::{
@@ -192,7 +192,12 @@ pub(super) async fn snapshot(source: &mut impl Source, kind: &str, id: &str) -> 
     let mut description = String::new();
     let mut cover_url = None;
     loop {
-        let page = source.next_page().await?;
+        let page_number = pages.len() + 1;
+        log::info!("Scanning page source={kind}:{id} page={page_number}");
+        let page = source
+            .next_page()
+            .await
+            .with_context(|| format!("Scan source={kind}:{id} page={page_number} failed"))?;
         ensure!(
             !page.suspicious,
             "Incomplete YouTube listing; previous feed and files preserved"
@@ -218,6 +223,11 @@ pub(super) async fn snapshot(source: &mut impl Source, kind: &str, id: &str) -> 
             "Repeated YouTube pagination; no files removed"
         );
         count += page.videos.len();
+        log::info!(
+            "Scanned page source={kind}:{id} page={page_number} entries={} total={count} continuation={}",
+            page.videos.len(),
+            page.continuation
+        );
         for entry in page.videos {
             let mut video = entry.video;
             video.published = video

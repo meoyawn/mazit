@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
 use llrt_modules::module_builder::ModuleBuilder;
 use llrt_utils::primordials::{BasePrimordials, Primordial};
@@ -29,6 +29,7 @@ pub(crate) struct Inner {
     // Persistent values must be destroyed before their context/runtime.
     pub exports: Persistent<Value<'static>>,
     pub context: AsyncContext,
+    pub wake: Arc<crate::wake::RuntimeWake>,
 }
 
 impl Engine {
@@ -63,7 +64,11 @@ impl Engine {
                 result.map_err(|e| Error::caught(&ctx, e))
             })
             .await?;
-        Ok(Self(Rc::new(Inner { exports, context })))
+        Ok(Self(Rc::new(Inner {
+            exports,
+            context,
+            wake: Arc::default(),
+        })))
     }
 
     /// The complete upstream module namespace, including YT, YTNodes, Misc,
@@ -107,7 +112,7 @@ impl Engine {
     /// Drive background jobs (e.g. event listeners) until idle. Long-lived
     /// subscriptions should run this alongside their cancellation future.
     pub async fn idle(&self) {
-        self.0.context.runtime().idle().await;
+        self.0.wake.run(self.0.context.runtime().idle()).await;
     }
 
     pub async fn run_gc(&self) {

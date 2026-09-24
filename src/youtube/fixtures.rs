@@ -2,6 +2,16 @@ use super::{YouTube, client::Request, listing};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 
+struct Responses(VecDeque<(&'static str, Value, Value)>);
+
+impl Drop for Responses {
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            assert!(self.0.is_empty(), "Unused YouTube responses");
+        }
+    }
+}
+
 struct Source<'a> {
     responses: &'a mut VecDeque<(&'static str, Value, Value)>,
     id: String,
@@ -41,40 +51,42 @@ impl listing::Source for Source<'_> {
 
 impl YouTube {
     pub(crate) fn with_responses(responses: Vec<(&'static str, Value, Value)>) -> Self {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
-        tokio::spawn(async move {
-            let mut responses = VecDeque::from(responses);
-            while let Some(request) = receiver.recv().await {
-                match request {
-                    Request::Resolve { url, reply } => {
-                        let response = take(&mut responses, "resolve", json!({"url": url}));
-                        let _ = reply.send(Ok(response["id"].as_str().unwrap().into()));
+        let sender = youtubei::Worker::new(
+            move || async move { tokio::sync::Mutex::new(Responses(responses.into())) },
+            |responses, request| {
+                Box::pin(async move {
+                    let mut responses = responses.lock().await;
+                    match request {
+                        Request::Resolve { url, reply } => {
+                            let response = take(&mut responses.0, "resolve", json!({"url": url}));
+                            let _ = reply.send(Ok(response["id"].as_str().unwrap().into()));
+                        }
+                        Request::Snapshot { kind, id, reply } => {
+                            let playlist = if kind == "channel" {
+                                format!("UU{}", &id[2..])
+                            } else {
+                                id.clone()
+                            };
+                            let mut source = Source {
+                                responses: &mut responses.0,
+                                id: playlist,
+                                continuation: false,
+                            };
+                            let _ = reply.send(listing::snapshot(&mut source, &kind, &id).await);
+                        }
+                        Request::Media { id, reply } => {
+                            let value = take(
+                                &mut responses.0,
+                                "media",
+                                json!({"id": id, "client": "VISIONOS"}),
+                            );
+                            let _ = reply.send(serde_json::from_value(value).map_err(Into::into));
+                        }
                     }
-                    Request::Snapshot { kind, id, reply } => {
-                        let playlist = if kind == "channel" {
-                            format!("UU{}", &id[2..])
-                        } else {
-                            id.clone()
-                        };
-                        let mut source = Source {
-                            responses: &mut responses,
-                            id: playlist,
-                            continuation: false,
-                        };
-                        let _ = reply.send(listing::snapshot(&mut source, &kind, &id).await);
-                    }
-                    Request::Media { id, reply } => {
-                        let value = take(
-                            &mut responses,
-                            "media",
-                            json!({"id": id, "client": "VISIONOS"}),
-                        );
-                        let _ = reply.send(serde_json::from_value(value).map_err(Into::into));
-                    }
-                }
-            }
-            assert!(responses.is_empty(), "Unused YouTube responses");
-        });
+                })
+            },
+        )
+        .unwrap();
         Self { sender }
     }
 }

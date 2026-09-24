@@ -161,7 +161,7 @@ impl JsValue {
         construct: bool,
         this: Option<&Self>,
     ) -> Result<Self> {
-        let value = async_with!(self.engine.0.context => |ctx| {
+        let value = self.engine.0.wake.run(async_with!(self.engine.0.context => |ctx| {
             let result = async {
                 let value = self.value.clone().restore(&ctx)?;
                 let mut args = Args::new(ctx.clone(), arguments.len());
@@ -183,22 +183,26 @@ impl JsValue {
                 Ok(Persistent::save(&ctx, value))
             }.await;
             result.map_err(|e| Error::caught(&ctx, e))
-        })
+        }))
         .await?;
         Ok(self.engine.retain(value))
     }
 
     /// Await a promise value without invoking it.
     pub async fn resolve(&self) -> Result<Self> {
-        let value = async_with!(self.engine.0.context => |ctx| {
-            let result = async {
-                let value = self.value.clone().restore(&ctx)?;
-                let value: Value = MaybePromise::from_value(value).into_future().await?;
-                Ok(Persistent::save(&ctx, value))
-            }.await;
-            result.map_err(|e| Error::caught(&ctx, e))
-        })
-        .await?;
+        let value = self
+            .engine
+            .0
+            .wake
+            .run(async_with!(self.engine.0.context => |ctx| {
+                let result = async {
+                    let value = self.value.clone().restore(&ctx)?;
+                    let value: Value = MaybePromise::from_value(value).into_future().await?;
+                    Ok(Persistent::save(&ctx, value))
+                }.await;
+                result.map_err(|e| Error::caught(&ctx, e))
+            }))
+            .await?;
         Ok(self.engine.retain(value))
     }
 

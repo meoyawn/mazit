@@ -15,31 +15,45 @@ async fn app_subscriptions_and_all_flat_pages_match_ytdlp() -> anyhow::Result<()
     assert!(!listings.is_empty());
     let directory = tempfile::tempdir()?;
     let core = Core::new(directory.path().into(), None)?;
+    let mut subscriptions = Vec::new();
     for listing in listings {
         let id = core.add(&listing.url).await?;
         assert_eq!(core.add(&listing.url).await?, id);
         let source = core.db.source(&id)?;
-        let snapshot = core
-            .youtube
-            .snapshot(&source.kind, &source.youtube_id)
-            .await?;
-        assert_eq!(
-            snapshot
-                .videos
-                .iter()
-                .map(|v| v.id.as_str())
-                .collect::<Vec<_>>(),
-            listing.ids
-        );
-        assert!(!snapshot.title.is_empty());
-        assert!(snapshot.cover_url.is_some());
-        core.db.snapshot(&id, &snapshot)?;
-        assert_eq!(core.db.episodes(&id)?.len(), snapshot.videos.len());
-        eprintln!(
-            "App subscription {}: all {} entries match yt-dlp in order",
-            source.youtube_id,
-            snapshot.videos.len()
-        );
+        subscriptions.push((id, source, listing));
     }
+    // Startup scans overlap. Sequential checks cannot catch scheduler stalls
+    // when the short channel scan finishes before a long playlist's next page.
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        futures::future::try_join_all(subscriptions.into_iter().map(|(id, source, listing)| {
+            let core = &core;
+            async move {
+                let snapshot = core
+                    .youtube
+                    .snapshot(&source.kind, &source.youtube_id)
+                    .await?;
+                assert_eq!(
+                    snapshot
+                        .videos
+                        .iter()
+                        .map(|v| v.id.as_str())
+                        .collect::<Vec<_>>(),
+                    listing.ids
+                );
+                assert!(!snapshot.title.is_empty());
+                assert!(snapshot.cover_url.is_some());
+                core.db.snapshot(&id, &snapshot)?;
+                assert_eq!(core.db.episodes(&id)?.len(), snapshot.videos.len());
+                eprintln!(
+                    "App subscription {}: all {} entries match yt-dlp in order",
+                    source.youtube_id,
+                    snapshot.videos.len()
+                );
+                Ok::<_, anyhow::Error>(())
+            }
+        })),
+    )
+    .await??;
     Ok(())
 }

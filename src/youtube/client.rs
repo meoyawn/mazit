@@ -1,9 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow, ensure};
-use futures::{StreamExt, stream::FuturesUnordered};
 use reqwest::Client;
-use tokio::sync::{OnceCell, mpsc, oneshot};
+use tokio::sync::{OnceCell, oneshot};
 use youtubei::{Engine, FetchFunction, Innertube, Player, SessionOptions, UniversalCache};
 
 use super::{
@@ -117,7 +116,7 @@ async fn handle(state: &Result<State>, request: Request) {
                 listing::snapshot(&mut source, &kind, &id).await
             }
             .await
-            .map_err(|e: anyhow::Error| anyhow!(crate::redact(&e.to_string())));
+            .map_err(|e: anyhow::Error| anyhow!(crate::redact(&format!("{e:#}"))));
             let _ = reply.send(result);
         }
         Request::Media { id, reply } => {
@@ -149,34 +148,12 @@ impl YouTube {
     fn with_worker<F, Fut>(initialize: F) -> Self
     where
         F: FnOnce() -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<State>>,
+        Fut: std::future::Future<Output = Result<State>> + 'static,
     {
-        let (sender, mut receiver) = mpsc::channel(32);
-        std::thread::Builder::new()
-            .name("youtube".into())
-            .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("YouTube executor")
-                    .block_on(async move {
-                        let state = initialize().await;
-                        let mut active = FuturesUnordered::new();
-                        loop {
-                            tokio::select! {
-                                request = receiver.recv(), if active.len() < 16 => {
-                                    match request {
-                                        Some(request) => active.push(handle(&state, request)),
-                                        None => break,
-                                    }
-                                }
-                                Some(()) = active.next(), if !active.is_empty() => {}
-                            }
-                        }
-                        while active.next().await.is_some() {}
-                    });
-            })
-            .expect("Start YouTube worker");
+        let sender = youtubei::Worker::new(initialize, |state, request| {
+            Box::pin(handle(state, request))
+        })
+        .expect("Start YouTube worker");
         Self { sender }
     }
 

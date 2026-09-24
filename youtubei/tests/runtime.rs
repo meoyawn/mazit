@@ -566,6 +566,72 @@ async fn asynchronous_calls_overlap_in_one_engine() -> youtubei::Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn staggered_calls_survive_completion_and_cancellation_of_a_sibling() -> youtubei::Result<()>
+{
+    for cancel_first in [false, true] {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let engine = Engine::new().await?;
+                let barrier = Rc::new(tokio::sync::Barrier::new(2));
+                let function = engine
+                    .value_with(|ctx| {
+                        Ok(Function::new(
+                            ctx,
+                            Async(move |id: u32| {
+                                let barrier = barrier.clone();
+                                async move {
+                                    if id != 0 {
+                                        barrier.wait().await;
+                                        tokio::time::sleep(Duration::from_millis(if id == 1 {
+                                            20
+                                        } else {
+                                            80
+                                        }))
+                                        .await;
+                                    }
+                                    Ok::<_, rquickjs::Error>(id)
+                                }
+                            }),
+                        )?
+                        .into_value())
+                    })
+                    .await?;
+                let one = function.clone();
+                let first = tokio::task::spawn_local(async move {
+                    let result = one.apply(None, &[1u32.into()]).await?;
+                    // A follow-up promise can register the short-lived caller as
+                    // the scheduler's last driver immediately before it exits.
+                    one.apply(None, &[0u32.into()]).await?;
+                    Ok::<_, youtubei::Error>(result)
+                });
+                let second =
+                    tokio::task::spawn_local(
+                        async move { function.apply(None, &[2u32.into()]).await },
+                    );
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    if cancel_first {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        // A JS operation can outlive its Rust caller. Dropping a
+                        // sibling must not steal the remaining caller's wake-up.
+                        second.abort();
+                        let _ = second.await;
+                        assert_eq!(first.await.unwrap()?.read::<u32>().await?, 1);
+                        engine.idle().await;
+                    } else {
+                        assert_eq!(first.await.unwrap()?.read::<u32>().await?, 1);
+                        assert_eq!(second.await.unwrap()?.read::<u32>().await?, 2);
+                    }
+                    Ok::<_, youtubei::Error>(())
+                })
+                .await
+                .expect("separate tasks must progress after a sibling exits")
+            })
+            .await?;
+    }
+    Ok(())
+}
+
 #[test]
 fn independent_worker_threads_each_own_a_reusable_engine() {
     let workers: Vec<_> = (0..3)
