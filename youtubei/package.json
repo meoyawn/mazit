@@ -1,0 +1,12 @@
+{
+  "name": "youtubei-rust-bundle",
+  "dependencies": {
+    "youtubei.js": "^18.0.0"
+  },
+  "packageManager": "bun@1.4.2",
+  "private": true,
+  "scripts": {
+    "bundle": "bun build node_modules/youtubei.js/dist/src/platform/cf-worker.js --target browser --format esm --keep-names --outfile generated/youtubei.js"
+  },
+  "type": "module"
+}

@@ -1,13 +1,7 @@
 {
-  "name": "mazit-youtube-bridge",
+  "name": "mazit-scripts",
   "private": true,
   "license": "MIT",
-  "scripts": {
-    "test": "bun test scripts"
-  },
-  "dependencies": {
-    "youtubei.js": "18.0.0"
-  },
   "devDependencies": {
     "@types/bun": "1.4.2",
     "oxfmt": "0.70.0",

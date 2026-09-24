@@ -1,0 +1,29 @@
+version: '3'
+
+tasks:
+  bundle:
+    desc: Bundle upstream youtubei.js and dependencies with Bun
+    run: once
+    sources: [package.json, bun.lock, Taskfile.yaml]
+    generates: [generated/youtubei.js]
+    cmds:
+      - bun install --frozen-lockfile
+      - bun run bundle
+
+  lint:
+    desc: Format and lint this isolated Rust crate
+    deps: [bundle]
+    cmds:
+      - cargo fmt --all
+      - cargo clippy --all-targets -- -D warnings
+
+  test:
+    desc: Test the embedded library without contacting YouTube
+    deps: [bundle]
+    run: once
+    cmd: cargo test --locked
+
+  build:
+    desc: Build this isolated Rust crate
+    deps: [bundle]
+    cmd: cargo build --locked

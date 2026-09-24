@@ -29,7 +29,7 @@ task bundle
 open dist/Mazit.app
 ```
 
-The build prepares FFmpeg and the embedded YouTube.js bridge automatically.
+The build prepares FFmpeg and the [native YouTube crate](youtubei/README.md) automatically.
 
 SQLite schema changes live in [`migrations/`](migrations/README.md), with embedded, checksum-verified Refinery migrations run by `src/database/migrations.rs`.
 
@@ -39,11 +39,11 @@ SQLite schema changes live in [`migrations/`](migrations/README.md), with embedd
 - `task build` — build the macOS Apple Silicon release binary at `target/aarch64-apple-darwin/release/mazit`.
 - `task bundle` — build the macOS app at `dist/Mazit.app`.
 - `task lint` — format the Rust workspace, then run Clippy.
-- `task test` — run the Cargo workspace and headless GPUI tests.
+- `task test` — run the Cargo workspace, native YouTube crate, and headless GPUI tests.
 - `task test:ui` — run the library's layout and interaction tests without desktop automation. See [UI testing](docs/testing.md).
 - `task check` — run lint and tests together as one check.
 
-The dependency graph is `run → build:debug → prepare` and `build → prepare`. Preparation bundles the YouTube bridge with Bun and runs the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build checksum-verified FFmpeg libraries. Task caches JavaScript installation, bundling, and FFmpeg preparation by input checksums and required output files. Changes to the source globs, dependency manifests, build configuration, or preparation script invalidate the relevant cache; missing required outputs rebuild it. JavaScript installation runs before bundling; Rust compilation waits for both the bridge and FFmpeg.
+The dependency graph is `run → build:debug → prepare` and `build → prepare`. Preparation runs `youtubei:bundle` and the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build checksum-verified FFmpeg libraries. The isolated `youtubei/` crate bundles upstream youtubei.js and its dependencies with one Bun build command, embeds QuickJS, and exposes reusable Rust objects. Generated JavaScript is ignored by Git. The desktop app depends on the Rust crate; its YouTube policies and shared HTTP transport live in Rust. Task caches bundling and FFmpeg preparation by input checksums and required output files. Rust compilation waits for both dependencies.
 
 ## Storage configuration
 
