@@ -78,21 +78,21 @@ These do not establish a startup improvement.
 
 ## Reproduce
 
-Prepare the native crate and FFmpeg with `task prepare`, and use an isolated
-checkout of the desired baseline commit. Ensure the current crate's npm install
-and bundle use the latest release. Then run:
+These historical results predate extraction to `listenbox/youtubei`. To measure
+the current pinned dependency, prepare FFmpeg with `task prepare`, and use an
+isolated checkout of the desired baseline commit. Then run:
 
 ```text
 bun run scripts/benchmark-youtube.ts /absolute/path/to/baseline --live
 ```
 
-Omit `--live` for only the controlled comparison. The runner resolves npm's
-latest version, updates only the isolated baseline's npm dependency, builds both
+Omit `--live` for only the controlled comparison. The runner reads the upstream
+version from the Cargo dependency, updates the isolated baseline's dependency, builds both
 binaries, and writes raw samples to `.cache/youtube-benchmark/results.json`.
 OpenSSL is needed for the loopback server certificate; yt-dlp is needed for live
 checks. Run separately from other builds and benchmarks. Generated bundles,
 certificates, binaries, and raw results remain ignored by Git.
 
-The earlier `youtubei/examples/boundary_bench.rs` compares batched property reads
+The shared crate's [boundary benchmark](https://github.com/listenbox/youtubei/blob/main/examples/boundary_bench.rs) compares batched property reads
 with individual reads inside the new crate. That microbenchmark is separate;
 none of the before/after figures above use it as the baseline.

@@ -45,7 +45,7 @@ toml = "0.8"
 tray-icon = { version = "=0.25.1", default-features = false, optional = true }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-youtubei = { path = "youtubei" }
+youtubei = { git = "https://github.com/listenbox/youtubei.git", rev = "a394160a92d3809bde4d4376d480373bc44ae82e" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
