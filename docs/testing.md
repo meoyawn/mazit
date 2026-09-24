@@ -1,13 +1,14 @@
 # Desktop UI tests
 
-Run `task test:ui` for the library UI, or `task test` for the entire suite. The task graph is `check → test → [test:unit, test:ui, youtubei:test]`; `check` also requires `lint`. The UI task enables the `ui-tests` feature and GPUI's `test-support` feature. No desktop interaction, screen capture, browser, credentials, or running Mazit instance is needed.
+Run `task test:ui` for the library UI, or `task test` for the entire suite. The task graph is `check → test → [test:unit, test:ui]`; `check` also requires `lint`. The UI task enables the `ui-tests` feature and GPUI's `test-support` feature. No desktop interaction, screen capture, browser, credentials, or running Mazit instance is needed.
 
 The approach follows [GPUI's testing introduction](https://github.com/zed-industries/zed/blob/main/crates/gpui/README.md#other-resources) and the APIs in the [TestAppContext and VisualTestContext source for our pinned GPUI revision](https://github.com/zed-industries/zed/blob/69e2130295c2649963eb639fc70b4f2ee8ea1624/crates/gpui/src/app/test_context.rs). Consult the installed `gpui-0.2.2` sources when examples from Zed's main branch use newer APIs.
 
 ## What runs
 
-The isolated `youtubei/` crate tests its actual Bun bundle in QuickJS with offline
-responses. App tests in `src/youtube/native_tests.rs` exercise that crate through
+The shared [youtubei crate](https://github.com/listenbox/youtubei) tests its embedded
+bundle in QuickJS with offline responses in its own repository.
+App tests in `src/youtube/native_tests.rs` exercise the pinned Cargo dependency through
 Rust HTTP callbacks, parser objects, flat continuations, and audio selection.
 The former TypeScript bridge tests now run as Rust tests.
 An app-worker integration test starts the actual dedicated thread, initializes a
@@ -18,15 +19,14 @@ The overlapping first-page responses are delayed by different amounts so one
 scan must keep progressing after the other finishes. The `youtubei` crate owns
 the worker, runtime scheduling, and tests for shared callers across threads.
 
-`task test:youtube-versions` runs the crate and desktop integration tests against
-npm releases 18.0.0 and 18.1.0. The bindings target the 18+ API. The script
-restores the normal bundle after running; run it separately from other
-builds. The normal test suite stays offline.
+Upstream bundle updates and binding tests belong to `listenbox/youtubei`.
+When changing the Git revision here, run the app's YouTube integration tests.
+The normal test suite stays offline.
 
 For performance against the pre-crate application, see
 [the baseline comparison](youtube-boundary-benchmark.md). Its shared Rust harness
 compares complete playlist scans and media-info resolution against an isolated
-`origin/main` checkout, using the latest npm library on both sides.
+baseline checkout, using the dependency's pinned upstream release on both sides.
 
 For a live end-to-end check, run `task prepare`, then
 `bun run scripts/test-youtube-live.ts`. It enumerates a long playlist and a

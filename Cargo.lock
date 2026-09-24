@@ -6907,6 +6907,7 @@ dependencies = [
  "bytes",
  "cookie",
  "cookie_store",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http 1.5.0",
@@ -6921,6 +6922,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls 0.23.45",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -8290,6 +8292,17 @@ dependencies = [
  "core-foundation-sys",
  "libc",
  "objc",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr 1.6.1",
 ]
 
 [[package]]
@@ -9968,6 +9981,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix 1.1.5",
+]
+
+[[package]]
 name = "xcb"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10093,15 +10116,21 @@ dependencies = [
 [[package]]
 name = "youtubei"
 version = "0.1.0"
+source = "git+https://github.com/listenbox/youtubei.git?rev=a394160a92d3809bde4d4376d480373bc44ae82e#a394160a92d3809bde4d4376d480373bc44ae82e"
 dependencies = [
+ "flate2",
  "futures-util",
  "llrt_modules",
  "llrt_utils_watts",
+ "reqwest",
  "rquickjs",
  "serde",
  "serde_json",
  "sha1 0.10.7",
+ "sha2 0.10.9",
+ "tar",
  "tokio",
+ "toml 0.8.23",
  "uuid",
 ]
 
@@ -10186,7 +10215,7 @@ dependencies = [
  "libc",
  "pin-project",
  "redox_syscall 0.2.16",
- "xattr",
+ "xattr 0.2.3",
 ]
 
 [[package]]

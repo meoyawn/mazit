@@ -15,21 +15,23 @@ await mkdir(output, { recursive: true });
 const baselineCommit = (
   await $`git rev-parse HEAD`.cwd(baseline).text()
 ).trim();
-const latest = (await $`bun pm view youtubei.js version`.text()).trim();
-const installed = await Bun.file(
-  join(root, "youtubei/node_modules/youtubei.js/package.json"),
-).json();
-assert.equal(
-  installed.version,
-  latest,
-  "Prepare the current crate with the latest npm release first",
+const metadata = await $`cargo metadata --locked --format-version 1`
+  .cwd(root)
+  .json();
+const dependency = metadata.packages.find(
+  (pkg: { name: string }) => pkg.name === "youtubei",
 );
+assert.ok(
+  dependency,
+  "Cargo metadata must include the pinned youtubei dependency",
+);
+const version = dependency.metadata.youtubei.version;
 const binaries = {
   baseline: join(output, "baseline"),
   current: join(output, "current"),
 };
 
-await $`bun add youtubei.js@${latest}`.cwd(baseline);
+await $`bun add youtubei.js@${version}`.cwd(baseline);
 await $`bun build js/youtube.ts --keep-names --target browser --format esm --outfile generated/youtube.js`.cwd(
   baseline,
 );
@@ -319,7 +321,7 @@ try {
     JSON.stringify(
       {
         baselineCommit,
-        youtubeiVersion: latest,
+        youtubeiVersion: version,
         date: new Date().toISOString(),
         requests,
         results,

@@ -1,10 +1,5 @@
 version: '3'
 
-includes:
-  youtubei:
-    taskfile: ./youtubei/Taskfile.yaml
-    dir: ./youtubei
-
 env:
   FFMPEG_DIR: '{{.ROOT_DIR}}/.runtime/ffmpeg'
   MACOSX_DEPLOYMENT_TARGET: '14.0'
@@ -19,8 +14,7 @@ tasks:
     cmd: >-
       sh -c 'MAZIT_DEV_WATCHER_PID=$$ exec watchexec
       --restart --debounce 300ms --stop-timeout 5s
-      --watch src --watch migrations --watch scripts --watch assets --watch youtubei/src
-      --watch youtubei/Cargo.toml --watch youtubei/package.json --watch youtubei/bun.lock
+      --watch src --watch migrations --watch scripts --watch assets
       --watch Cargo.toml --watch Cargo.lock --watch build.rs --watch Taskfile.yaml
       --watch package.json --watch bun.lock
       --shell none -- sh scripts/dev-run.sh'
@@ -60,14 +54,13 @@ tasks:
     deps: [prepare]
     cmds:
       - task: scripts:lint
-      - task: youtubei:lint
       - cargo fmt --all
       - cargo clippy --workspace --all-targets --features ui-tests -- -D warnings
 
   test:
-    desc: Run Cargo, native YouTube, and headless GPUI tests
+    desc: Run Cargo and headless GPUI tests, including the YouTube integration
     run: once
-    deps: [test:unit, test:ui, youtubei:test]
+    deps: [test:unit, test:ui]
 
   test:unit:
     desc: Run Cargo workspace tests
@@ -81,19 +74,14 @@ tasks:
     deps: [prepare]
     cmd: cargo test --lib --features ui-tests desktop::tests
 
-  test:youtube-versions:
-    desc: Test the native crate and app against npm youtubei.js releases
-    deps: [prepare]
-    cmd: bun run scripts/test-youtube-versions.ts {{.CLI_ARGS}}
-
   check:
     desc: Format, lint, and test the workspace
     deps: [lint, test]
 
   prepare:
-    desc: Prepare the native YouTube crate and FFmpeg
+    desc: Prepare native FFmpeg libraries
     run: once
-    deps: [youtubei:bundle, ffmpeg:build]
+    deps: [ffmpeg:build]
 
   scripts:install:
     internal: true

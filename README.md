@@ -29,7 +29,8 @@ task bundle
 open dist/Mazit.app
 ```
 
-The build prepares FFmpeg and the [native YouTube crate](youtubei/README.md) automatically.
+The build prepares FFmpeg automatically. Cargo fetches the pinned
+[native YouTube crate](https://github.com/listenbox/youtubei) directly from Git.
 
 SQLite schema changes live in [`migrations/`](migrations/README.md), with embedded, checksum-verified Refinery migrations run by `src/database/migrations.rs`.
 
@@ -39,11 +40,18 @@ SQLite schema changes live in [`migrations/`](migrations/README.md), with embedd
 - `task build` — build the macOS Apple Silicon release binary at `target/aarch64-apple-darwin/release/mazit`.
 - `task bundle` — build the macOS app at `dist/Mazit.app`.
 - `task lint` — format the Rust workspace, then run Clippy.
-- `task test` — run the Cargo workspace, native YouTube crate, and headless GPUI tests.
+- `task test` — run the Cargo workspace, YouTube integration, and headless GPUI tests.
 - `task test:ui` — run the library's layout and interaction tests without desktop automation. See [UI testing](docs/testing.md).
 - `task check` — run lint and tests together as one check.
 
-The dependency graph is `run → build:debug → prepare` and `build → prepare`. Preparation runs `youtubei:bundle` and the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build checksum-verified FFmpeg libraries. The isolated `youtubei/` crate bundles upstream youtubei.js and its dependencies with one Bun build command, embeds QuickJS, and exposes reusable Rust objects. Generated JavaScript is ignored by Git. The desktop app depends on the Rust crate; its YouTube policies and shared HTTP transport live in Rust. Task caches bundling and FFmpeg preparation by input checksums and required output files. Rust compilation waits for both dependencies.
+The dependency graph is `run → build:debug → prepare` and `build → prepare`.
+Preparation runs the Bun Shell script in `scripts/prepare-ffmpeg.ts` to build
+checksum-verified FFmpeg libraries. The `youtubei` Cargo Git dependency embeds
+QuickJS and downloads the published upstream CF-worker bundle, verifying its
+checksum inside Cargo's output directory; no submodule setup or JavaScript
+bundling is needed. Its exact revision is pinned in Cargo.toml and Cargo.lock. YouTube
+policies and the shared HTTP transport stay in this app's Rust code. Task caches
+FFmpeg preparation by input checksums and required output files.
 
 ## Storage configuration
 
