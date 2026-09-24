@@ -1,5 +1,10 @@
 version: '3'
 
+includes:
+  youtubei:
+    taskfile: ./youtubei/Taskfile.yaml
+    dir: ./youtubei
+
 env:
   FFMPEG_DIR: '{{.ROOT_DIR}}/.runtime/ffmpeg'
   MACOSX_DEPLOYMENT_TARGET: '14.0'
@@ -14,7 +19,8 @@ tasks:
     cmd: >-
       sh -c 'MAZIT_DEV_WATCHER_PID=$$ exec watchexec
       --restart --debounce 300ms --stop-timeout 5s
-      --watch src --watch migrations --watch js --watch scripts --watch assets
+      --watch src --watch migrations --watch scripts --watch assets --watch youtubei/src
+      --watch youtubei/Cargo.toml --watch youtubei/package.json --watch youtubei/bun.lock
       --watch Cargo.toml --watch Cargo.lock --watch build.rs --watch Taskfile.yaml
       --watch package.json --watch bun.lock
       --shell none -- sh scripts/dev-run.sh'
@@ -51,58 +57,45 @@ tasks:
   lint:
     desc: Format and lint the TypeScript sources and Rust workspace
     run: once
+    deps: [prepare]
     cmds:
-      - task: js:lint
+      - task: scripts:lint
+      - task: youtubei:lint
       - cargo fmt --all
       - cargo clippy --workspace --all-targets --features ui-tests -- -D warnings
 
   test:
-    desc: Run JavaScript, Cargo workspace, and headless GPUI tests
+    desc: Run Cargo, native YouTube, and headless GPUI tests
     run: once
-    deps: [test:js, test:unit, test:ui]
-
-  test:js:
-    desc: Test flat YouTube listing metadata extraction
-    run: once
-    cmd: bun run test
+    deps: [test:unit, test:ui, youtubei:test]
 
   test:unit:
     desc: Run Cargo workspace tests
     run: once
+    deps: [prepare]
     cmd: cargo test --workspace
 
   test:ui:
     desc: Run headless GPUI layout and interaction tests
     run: once
+    deps: [prepare]
     cmd: cargo test --lib --features ui-tests desktop::tests
+
+  test:youtube-versions:
+    desc: Test the native crate and app against npm youtubei.js releases
+    deps: [prepare]
+    cmd: bun run scripts/test-youtube-versions.ts {{.CLI_ARGS}}
 
   check:
     desc: Format, lint, and test the workspace
     deps: [lint, test]
 
   prepare:
-    desc: Prepare the JavaScript bridge and native libraries
+    desc: Prepare the native YouTube crate and FFmpeg
     run: once
-    deps: [js:bundle, ffmpeg:build]
+    deps: [youtubei:bundle, ffmpeg:build]
 
-  js:bundle:
-    internal: true
-    run: once
-    deps: [js:install]
-    sources:
-      - js/**/*.ts
-      - tsconfig*.json
-      - package.json
-      - bun.lock*
-      - bunfig.toml
-      - Taskfile.yaml
-    generates:
-      - generated/youtube.js
-    cmd: >-
-      bun build js/youtube.ts --keep-names --target browser
-      --format esm --outfile generated/youtube.js
-
-  js:install:
+  scripts:install:
     internal: true
     run: once
     sources:
@@ -111,15 +104,16 @@ tasks:
       - bunfig.toml
       - Taskfile.yaml
     generates:
-      - node_modules/{youtubei.js,oxfmt,oxlint,typescript,@types/bun}/package.json
+      - node_modules/{oxfmt,oxlint,typescript,@types/bun}/package.json
     cmd: bun install --frozen-lockfile
 
-  js:lint:
+  scripts:lint:
     desc: Format TypeScript sources and configuration, then lint with Oxlint
     run: once
+    deps: [scripts:install]
     cmds:
-      - bun run oxfmt --write js scripts package.json tsconfig.json .oxfmtrc.json
-      - bun run oxlint --deny-warnings js scripts
+      - bun run oxfmt --write scripts package.json tsconfig.json .oxfmtrc.json
+      - bun run oxlint --deny-warnings scripts
 
   ffmpeg:build:
     internal: true

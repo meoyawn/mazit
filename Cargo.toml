@@ -20,7 +20,6 @@ ui-tests = ["desktop", "gpui/test-support"]
 [dependencies]
 anyhow = "1"
 aws-sdk-s3 = { version = "=1.149.0", default-features = false, features = ["default-https-client", "rt-tokio", "rustls"] }
-base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6"
 ffmpeg = { package = "ffmpeg-the-third", version = "=6.0.0", default-features = false, features = ["static", "format", "software-resampling"] }
@@ -29,14 +28,11 @@ futures = "0.3"
 gpui = { version = "=0.2.2", optional = true }
 gpui-component = { version = "=0.5.1", optional = true }
 gpui-component-assets = { version = "=0.5.1", optional = true }
-llrt_modules = { version = "=0.8.1-beta", default-features = false, features = ["abort", "buffer", "crypto", "crypto-rust", "events", "exceptions", "fetch", "stream-web", "timers", "url", "util", "path", "intl", "tls-ring"] }
-llrt_utils = { package = "llrt_utils_watts", version = "=0.8.1-beta" }
 log = "0.4"
 parking_lot = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json", "cookies", "gzip", "brotli"] }
 refinery = { version = "=0.9.2", default-features = false, features = ["rusqlite"] }
 regex = "1"
-rquickjs = { version = "=0.11.0", features = ["full-async"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -49,6 +45,7 @@ toml = "0.8"
 tray-icon = { version = "=0.25.1", default-features = false, optional = true }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
+youtubei = { path = "youtubei" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
